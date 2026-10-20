@@ -2,7 +2,7 @@
 # Run by tmux hooks (new session/window/pane, config load): start recording every pane
 # that isn't recorded yet, into ~/tmux-logs/<session>/<start>_w<window>p<pane>_<id>.NNN.log
 dir=${LOG_DIR:-$HOME/tmux-logs}
-logger=${ADDAI_LIB:-/usr/local/lib/addai}/tmux/pane-logger
+logger=${ADD_AI_USER_LIB:-/usr/local/lib/add-ai-user}/tmux/pane-logger
 
 tmux list-panes -a -F '#{pane_pipe} #{pane_id} #{window_index} #{pane_index} #{session_name}' |
 while read -r piped id win pane session; do

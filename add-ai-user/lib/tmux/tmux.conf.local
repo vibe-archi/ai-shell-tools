@@ -426,11 +426,11 @@ tmux_conf_urlscan_options="--compact --dedupe"
 #set -g status-position top
 
 
-# -- addai: byobu-like setup ---------------------------------------------------
-# Installed by add-ai-user.sh. Oh my tmux! look with
-# byobu's key bindings. F1 shows the cheat sheet (/usr/local/lib/addai/tmux/help),
-# keep it in sync when changing bindings below. "add-ai-user.sh --update <user>" overwrites
-# this file (the previous one is kept as tmux.conf.local.bak-<date>).
+# -- add-ai-user: byobu-like setup --------------------------------------------
+# Installed by add-ai-user.sh: Oh my tmux! look with byobu's key bindings. F1 shows the
+# cheat sheet (/usr/local/lib/add-ai-user/tmux/help), keep it in sync when changing the
+# bindings below. "add-ai-user.sh --update <user>" overwrites this file (the previous
+# one is kept as tmux.conf.local.bak-<date>).
 
 # UTF-8 for popups and editors when the ssh client sends no locale (e.g. ssh from Windows)
 %if #{==:#{LANG},}
@@ -450,7 +450,7 @@ unbind C-a
 bind F12 send-prefix -2
 
 # help
-bind -n F1   display-popup -E -b rounded -w 90% -h 90% -T " Help " "/usr/local/lib/addai/tmux/help"
+bind -n F1   display-popup -E -b rounded -w 90% -h 90% -T " Help " "/usr/local/lib/add-ai-user/tmux/help"
 bind -n S-F1 list-keys
 
 # windows
@@ -497,7 +497,7 @@ bind -n M-F6   detach-client -a \; display "Other clients detached"
 bind -n F7      copy-mode
 bind -n M-PPage copy-mode -u
 bind -n M-NPage copy-mode \; send -X page-down
-bind -n S-F7    run-shell "/usr/local/lib/addai/tmux/printscreen '#{pane_id}'"
+bind -n S-F7    run-shell "/usr/local/lib/add-ai-user/tmux/printscreen '#{pane_id}'"
 bind -n M-IC    paste-buffer -p
 
 # config, menu, broadcast
@@ -520,8 +520,8 @@ bind -n F9   display-menu -T "#[align=centre] Menu " -x C -y C \
   "Edit configuration"                                 e "send-keys -K C-b e" \
   "Reload configuration"                               R "send-keys -K F5" \
   "Detach"                                             d "send-keys -K F6"
-bind -n S-F9 command-prompt -p "Command for every pane:" "set -g @broadcast \"%%%\" ; run-shell \"/usr/local/lib/addai/tmux/broadcast panes '#{window_id}'\""
-bind -n C-F9 command-prompt -p "Command for every window:" "set -g @broadcast \"%%%\" ; run-shell \"/usr/local/lib/addai/tmux/broadcast windows '#{session_id}'\""
+bind -n S-F9 command-prompt -p "Command for every pane:" "set -g @broadcast \"%%%\" ; run-shell \"/usr/local/lib/add-ai-user/tmux/broadcast panes '#{window_id}'\""
+bind -n C-F9 command-prompt -p "Command for every window:" "set -g @broadcast \"%%%\" ; run-shell \"/usr/local/lib/add-ai-user/tmux/broadcast windows '#{session_id}'\""
 bind -n M-F9 setw synchronize-panes \; display "Synchronized panes: #{?synchronize-panes,on,off}"
 
 # F-keys off/on (lets htop, mc, vim… receive them) and mouse toggle
@@ -532,13 +532,13 @@ bind -n M-F12 set -gF mouse '#{?mouse,off,on}' \; display "Mouse: #{?mouse,on,of
 
 # -- logging -------------------------------------------------------------------
 # Every pane is recorded in ~/tmux-logs (log-panes + pane-logger), the
-# addai-janitor@<user> timer compresses, expires and caps them. Read them back
-# with "tmux-logs". The addai ssh-gate refuses set-hook / pipe-pane over SSH.
+# add-ai-user-janitor@<user> timer compresses, expires and caps them. Read them back
+# with "tmux-logs". The add-ai-user ssh-gate refuses set-hook / pipe-pane over SSH.
 
-set-hook -g after-new-session  'run-shell -b "/usr/local/lib/addai/tmux/log-panes"'
-set-hook -g after-new-window   'run-shell -b "/usr/local/lib/addai/tmux/log-panes"'
-set-hook -g after-split-window 'run-shell -b "/usr/local/lib/addai/tmux/log-panes"'
-run-shell -b '/usr/local/lib/addai/tmux/log-panes'   # panes already open when the config is loaded
+set-hook -g after-new-session  'run-shell -b "/usr/local/lib/add-ai-user/tmux/log-panes"'
+set-hook -g after-new-window   'run-shell -b "/usr/local/lib/add-ai-user/tmux/log-panes"'
+set-hook -g after-split-window 'run-shell -b "/usr/local/lib/add-ai-user/tmux/log-panes"'
+run-shell -b '/usr/local/lib/add-ai-user/tmux/log-panes'   # panes already open when the config is loaded
 
 
 # -- tpm -----------------------------------------------------------------------

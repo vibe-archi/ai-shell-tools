@@ -1,5 +1,5 @@
 [Unit]
-Description=addai: tmux pane logs janitor of %i, every 2 minutes
+Description=add-ai-user: tmux pane logs janitor of %i, every 2 minutes
 
 [Timer]
 OnBootSec=2min

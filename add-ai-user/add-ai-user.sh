@@ -19,25 +19,28 @@ SSH gate, log janitor) is installed or updated on the way.
 
 Options:
   -k, --key <file|key>  authorize SSH public key(s): a file such as id_ed25519.pub, or
-                        the key itself ("ssh-ed25519 AAAA... comment"); repeatable
+                        the key itself ("ssh-ed25519 AAAA... comment"); repeatable.
+                        Without --key, if the user has no key yet, it is asked for:
+                        paste it, then confirm it or enter it again
+      --no-key          don't ask for a key (password login, or keys added later)
   -m, --message <file>  text shown below the "connection refused" message, copied to
                         ~<user>/.ai/con-refused.txt
   -p, --password        set the user's password (asked interactively)
   -s, --sudo            add the user to the sudo group (asks for a password if it has none)
-  -u, --update          <user> already exists: (re)apply the addai setup to it
-      --host <name>     host name shown in the refusal message (/etc/addai/addai.conf)
+  -u, --update          <user> already exists: (re)apply the add-ai-user setup to it
+      --host <name>     host name shown in the refusal message
       --system-only     install or update the system part only
-      --remove <user>   take <user> out of addai (the account and its files are kept)
-      --uninstall       remove addai from the system (users and their files are kept)
+      --remove <user>   take <user> out of add-ai-user (the account and its files are kept)
+      --uninstall       remove add-ai-user from the system (users and their files are kept)
   -h, --help            show this help
 EOF
 }
 
 SRC=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
-LIB=/usr/local/lib/addai
-CONF_DIR=/etc/addai
-GROUP=addai
-SSHD_CONF=/etc/ssh/sshd_config.d/60-addai.conf
+LIB=/usr/local/lib/add-ai-user
+CONF_DIR=/etc/add-ai-user
+GROUP=add-ai-user
+SSHD_CONF=/etc/ssh/sshd_config.d/60-add-ai-user.conf
 UNITS=/etc/systemd/system
 OMT_REPO=https://github.com/gpakosz/.tmux.git
 UTF8_MARK='#tmux-utf8#'
@@ -75,7 +78,7 @@ install_system() {
   grep -qiE '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/\*\.conf' /etc/ssh/sshd_config ||
     die "/etc/ssh/sshd_config doesn't include /etc/ssh/sshd_config.d/*.conf"
 
-  say "Installing addai in $LIB"
+  say "Installing add-ai-user in $LIB"
   getent group "$GROUP" >/dev/null || groupadd --system "$GROUP"
   install -d -m 755 "$LIB" "$LIB/tmux" "$CONF_DIR"
   install -m 755 "$SRC/lib/ssh-gate" "$SRC/lib/tmux-logs-janitor" "$SRC/lib/tmux-logs" "$LIB/"
@@ -90,13 +93,13 @@ install_system() {
     git clone -q --single-branch "$OMT_REPO" "$LIB/oh-my-tmux"
   fi
 
-  [ -f "$CONF_DIR/addai.conf" ] || install -m 644 "$SRC/etc/addai.conf" "$CONF_DIR/addai.conf"
-  [ -z "$HOST_NAME" ] || sed -i "s|^SSH_HOST=.*|SSH_HOST=$HOST_NAME|" "$CONF_DIR/addai.conf"
+  [ -f "$CONF_DIR/add-ai-user.conf" ] || install -m 644 "$SRC/etc/add-ai-user.conf" "$CONF_DIR/add-ai-user.conf"
+  [ -z "$HOST_NAME" ] || sed -i "s|^SSH_HOST=.*|SSH_HOST=$HOST_NAME|" "$CONF_DIR/add-ai-user.conf"
 
-  install -m 644 "$SRC/systemd/addai-janitor@.service" "$SRC/systemd/addai-janitor@.timer" "$UNITS/"
+  install -m 644 "$SRC/systemd/add-ai-user-janitor@.service" "$SRC/systemd/add-ai-user-janitor@.timer" "$UNITS/"
   systemctl daemon-reload
 
-  install -m 644 "$SRC/sshd/60-addai.conf" "$SSHD_CONF"
+  install -m 644 "$SRC/sshd/60-add-ai-user.conf" "$SSHD_CONF"
   if ! sshd -t; then
     rm -f "$SSHD_CONF"
     die "sshd rejected the configuration, $SSHD_CONF removed"
@@ -109,23 +112,58 @@ install_system() {
 # run a command as the user, with its own HOME and outside any tmux of the caller
 as_user() { runuser -u "$USER_NAME" -- env -u TMUX -u TMUX_PANE HOME="$HOME_DIR" "$@"; }
 
-key_lines() {  # the SSH public keys given with --key, one per line
+is_public_key() {
+  command -v ssh-keygen >/dev/null || die "ssh-keygen not found (apt install openssh-client)"
+  printf '%s\n' "$1" | ssh-keygen -l -f - >/dev/null 2>&1
+}
+
+key_lines() {  # the SSH public keys given with --key (files or keys), one per line
   local key
   for key in "${KEYS[@]}"; do
-    if [ -f "$key" ]; then grep -E '^(ssh-|ecdsa-|sk-)' "$key" || die "no SSH public key in $key"
-    elif [[ $key =~ ^(ssh-|ecdsa-|sk-) ]]; then printf '%s\n' "$key"
-    else die "--key: neither a file nor an SSH public key: $key"
+    if [ -f "$key" ]; then grep -vE '^[[:space:]]*(#|$)' "$key" || true
+    else printf '%s\n' "$key"
     fi
+  done
+}
+
+check_keys() {  # dies on a bad --key, before anything is changed
+  local line n=0
+  while IFS= read -r line; do
+    is_public_key "$line" || die "--key: not an SSH public key (a .pub file or \"ssh-ed25519 AAAA...\"): ${line:0:40}"
+    n=$((n + 1))
+  done < <(key_lines)
+  ((n > 0)) || die "--key: no SSH public key found"
+}
+
+ask_key() {  # no --key: ask for one, then confirm it or enter it again
+  local key fingerprint answer
+  [ -t 0 ] || die "no --key given and no terminal to ask for one (or use --no-key)"
+  say "No --key given: paste the SSH public key $TARGET will log in with"
+  while :; do
+    read -r -p "SSH public key: " key || die "cancelled"
+    key=$(printf '%s' "$key" | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+    if ! fingerprint=$(printf '%s\n' "$key" | ssh-keygen -l -f - 2>/dev/null); then
+      warn "not an SSH public key (it looks like: ssh-ed25519 AAAA... comment), try again"
+      continue
+    fi
+    if ((${#key} > 72)); then
+      printf '  key:         %s...%s\n' "${key:0:40}" "${key: -28}"
+    else
+      printf '  key:         %s\n' "$key"
+    fi
+    printf '  fingerprint: %s\n' "$fingerprint"
+    read -r -p "Is this the right key? [y = yes, n = enter it again] " answer || die "cancelled"
+    case $answer in
+      [yY]*) KEYS+=("$key"); return ;;
+    esac
   done
 }
 
 setup_user() {
   USER_NAME=$1
   if id "$USER_NAME" >/dev/null 2>&1; then
-    $UPDATE || die "user $USER_NAME already exists (add --update to apply the addai setup to it)"
     say "Updating $USER_NAME"
   else
-    $UPDATE && die "user $USER_NAME doesn't exist"
     say "Creating $USER_NAME"
     useradd --create-home --shell /bin/bash "$USER_NAME"
   fi
@@ -179,13 +217,13 @@ EOF
     as_user tee "$HOME_DIR/.ai/con-refused.txt" >/dev/null < "$MESSAGE"
   fi
 
-  systemctl enable --now --quiet "addai-janitor@$USER_NAME.timer"
+  systemctl enable --now --quiet "add-ai-user-janitor@$USER_NAME.timer"
   if as_user tmux has-session 2>/dev/null; then
     as_user tmux source-file "$HOME_DIR/.config/tmux/tmux.conf" && say "Reloaded the running tmux of $USER_NAME"
   fi
 
   local host
-  host=$(. "$CONF_DIR/addai.conf"; echo "${SSH_HOST:-$(hostname -f)}")
+  host=$(. "$CONF_DIR/add-ai-user.conf"; echo "${SSH_HOST:-$(hostname -f)}")
   if ! [ -s "$HOME_DIR/.ssh/authorized_keys" ] && [ "$(passwd -S "$USER_NAME" | cut -d' ' -f2)" != P ]; then
     warn "$USER_NAME has neither an SSH key nor a password: nobody can log in yet (see --key)"
   fi
@@ -202,32 +240,34 @@ EOF
 remove_user() {
   local user=$1
   id "$user" >/dev/null 2>&1 || die "no user $user"
-  systemctl disable --now "addai-janitor@$user.timer" >/dev/null 2>&1 || true
+  systemctl disable --now "add-ai-user-janitor@$user.timer" >/dev/null 2>&1 || true
   gpasswd -d "$user" "$GROUP" >/dev/null 2>&1 || true
-  say "$user is no longer an addai user (the account, its tmux setup and its logs are kept)"
+  say "$user is no longer an add-ai-user account (the account, its tmux setup and its logs are kept)"
 }
 
 uninstall() {
   local timer
-  for timer in "$UNITS"/timers.target.wants/addai-janitor@*.timer; do
+  for timer in "$UNITS"/timers.target.wants/add-ai-user-janitor@*.timer; do
     [ -e "$timer" ] && remove_user "$(basename "$timer" .timer | cut -d@ -f2)"
   done
   rm -f "$SSHD_CONF"
   sshd -t && reload_sshd
-  rm -f "$UNITS/addai-janitor@.service" "$UNITS/addai-janitor@.timer" /usr/local/bin/tmux-logs
+  rm -f "$UNITS/add-ai-user-janitor@.service" "$UNITS/add-ai-user-janitor@.timer" /usr/local/bin/tmux-logs
   systemctl daemon-reload
   rm -rf "$LIB"
   groupdel "$GROUP" 2>/dev/null || true
-  say "addai removed. Kept: $CONF_DIR, the users, their ~/tmux-logs and ~/.config/tmux"
+  say "add-ai-user removed. Kept: $CONF_DIR, the users, their ~/tmux-logs and ~/.config/tmux"
   say "(their ~/.config/tmux/tmux.conf now points to a removed Oh my tmux!)"
 }
 
 # -- main ----------------------------------------------------------------------
 
-KEYS=() MESSAGE='' PASSWORD=false SUDO=false UPDATE=false HOST_NAME='' ACTION=user TARGET=''
+KEYS=() NO_KEY=false MESSAGE='' PASSWORD=false SUDO=false UPDATE=false HOST_NAME=''
+ACTION=user TARGET=''
 while (($#)); do
   case $1 in
     -k|--key)      KEYS+=("${2:?$1 needs a value}"); shift 2 ;;
+    --no-key)      NO_KEY=true; shift ;;
     -m|--message)  MESSAGE=${2:?$1 needs a file}; shift 2 ;;
     -p|--password) PASSWORD=true; shift ;;
     -s|--sudo)     SUDO=true; shift ;;
@@ -245,7 +285,7 @@ done
 [ "$(id -u)" -eq 0 ] || die "run me as root (sudo $0 ...)"
 [ -z "$HOST_NAME" ] || [[ $HOST_NAME =~ ^[A-Za-z0-9.-]+$ ]] || die "invalid host name: $HOST_NAME"
 [ -z "$MESSAGE" ] || [ -r "$MESSAGE" ] || die "cannot read $MESSAGE"
-((${#KEYS[@]} == 0)) || key_lines >/dev/null  # dies on a bad --key before changing anything
+((${#KEYS[@]} == 0)) || check_keys
 
 case $ACTION in
   system)    install_system ;;
@@ -254,6 +294,16 @@ case $ACTION in
   user)
     [ -n "$TARGET" ] || { usage; exit 1; }
     [[ $TARGET =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die "invalid user name: $TARGET"
+    if home=$(getent passwd "$TARGET" | cut -d: -f6) && [ -n "$home" ]; then
+      $UPDATE || die "user $TARGET already exists (add --update to apply the add-ai-user setup to it)"
+    else
+      $UPDATE && die "user $TARGET doesn't exist"
+      home=''
+    fi
+    # ask for a key before changing anything, unless the user already has one
+    if ((${#KEYS[@]} == 0)) && ! $NO_KEY && { [ -z "$home" ] || [ ! -s "$home/.ssh/authorized_keys" ]; }; then
+      ask_key
+    fi
     install_system
     setup_user "$TARGET"
     ;;

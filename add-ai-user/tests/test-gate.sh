@@ -1,7 +1,7 @@
 #!/bin/bash
-# test-gate.sh [gate]: feed SSH_ORIGINAL_COMMAND cases to the addai ssh-gate (no TTY) and check
+# test-gate.sh [gate]: feed SSH_ORIGINAL_COMMAND cases to the add-ai-user ssh-gate (no TTY) and check
 # which ones are refused. Allowed cases really run tmux, so they are all harmless.
-gate=${1:-/usr/local/lib/addai/ssh-gate}
+gate=${1:-/usr/local/lib/add-ai-user/ssh-gate}
 fails=0
 
 t() {

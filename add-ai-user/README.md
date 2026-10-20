@@ -12,12 +12,9 @@ tmux server and watch, and every pane is recorded in `~/tmux-logs` anyway.
 > pane, and the agent owns its logs. It keeps honest agents in plain sight; it does not
 > stop a hostile one.
 
-On the system, everything uses the short name **addai**: the `addai` group (its members
-are the "addai accounts"), `/usr/local/lib/addai`, `/etc/addai`, `addai-janitor@<user>`.
-
 ## What you get
 
-- **An SSH gate** (`ForceCommand` for the members of the `addai` group): only `tmux`
+- **An SSH gate** (`ForceCommand` for the members of the `add-ai-user` group): only `tmux`
   commands on the account's default tmux server go through, plus scp / sftp. Shells,
   other commands, private tmux servers (`-L`, `-S`) and every tmux command that runs
   something outside a visible pane (`run-shell`, `if-shell`, a command given to
@@ -49,6 +46,17 @@ sudo ./add-ai-user.sh --host server.example.com --key ~/agent_key.pub --message 
 This installs the system part (once), creates `bob`, authorizes the key, copies
 `rules.txt` to `~bob/.ai/con-refused.txt` and starts bob's log janitor.
 
+Without `--key`, when the user has no key yet, the script asks for one before changing
+anything: paste the public key, check its fingerprint, then confirm it or enter it again.
+
+```
+==> No --key given: paste the SSH public key bob will log in with
+SSH public key: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... agent@laptop
+  key:         ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...k9xYbV2cTn8uE5fHs7dLp agent@laptop
+  fingerprint: 256 SHA256:Wq3mJr0k9xYbV2cTn8uE5fHs7dLpA1gZ4iKoR6tMvNe agent@laptop (ED25519)
+Is this the right key? [y = yes, n = enter it again] y
+```
+
 ```
 Usage: sudo ./add-ai-user.sh [options] <user>
        sudo ./add-ai-user.sh --update [options] <user>
@@ -57,14 +65,15 @@ Usage: sudo ./add-ai-user.sh [options] <user>
        sudo ./add-ai-user.sh --uninstall
 
   -k, --key <file|key>  authorize SSH public key(s), repeatable
+      --no-key          don't ask for a key (password login, or keys added later)
   -m, --message <file>  text shown below the "connection refused" message
   -p, --password        set the user's password (asked interactively)
   -s, --sudo            add the user to the sudo group (asks for a password if it has none)
-  -u, --update          <user> already exists: (re)apply the addai setup to it
+  -u, --update          <user> already exists: (re)apply the add-ai-user setup to it
       --host <name>     host name shown in the refusal message
       --system-only     install or update the system part only
-      --remove <user>   take <user> out of addai (the account and its files are kept)
-      --uninstall       remove addai from the system (users and their files are kept)
+      --remove <user>   take <user> out of add-ai-user (the account and its files are kept)
+      --uninstall       remove add-ai-user from the system (users and their files are kept)
 ```
 
 Running `add-ai-user.sh` again is safe: it updates the system part (and Oh my tmux!) in place.
@@ -153,7 +162,7 @@ Byobu's keys, on top of Oh my tmux!. **F1** shows them all, **F9** opens a menu.
 
 ## Configuration
 
-`/etc/addai/addai.conf`, shared by every addai account:
+`/etc/add-ai-user/add-ai-user.conf`, shared by every add-ai-user account:
 
 ```bash
 SSH_HOST=server.example.com   # host name shown in the refusal message
@@ -170,14 +179,14 @@ Per account: `~/.ai/con-refused.txt` (refusal message) and
 
 | Path | What |
 | --- | --- |
-| `/usr/local/lib/addai/ssh-gate` | the SSH gate (Python) |
-| `/usr/local/lib/addai/oh-my-tmux/` | Oh my tmux!, shared by every account |
-| `/usr/local/lib/addai/tmux/` | tmux template config, F1 help, recording and broadcast scripts |
-| `/usr/local/lib/addai/tmux-logs-janitor` | compresses, expires and caps the logs |
+| `/usr/local/lib/add-ai-user/ssh-gate` | the SSH gate (Python) |
+| `/usr/local/lib/add-ai-user/oh-my-tmux/` | Oh my tmux!, shared by every account |
+| `/usr/local/lib/add-ai-user/tmux/` | tmux template config, F1 help, recording and broadcast scripts |
+| `/usr/local/lib/add-ai-user/tmux-logs-janitor` | compresses, expires and caps the logs |
 | `/usr/local/bin/tmux-logs` | log reader |
-| `/etc/addai/addai.conf` | settings |
-| `/etc/ssh/sshd_config.d/60-addai.conf` | `Match Group addai` + `ForceCommand` |
-| `/etc/systemd/system/addai-janitor@.{service,timer}` | one janitor timer per account |
+| `/etc/add-ai-user/add-ai-user.conf` | settings |
+| `/etc/ssh/sshd_config.d/60-add-ai-user.conf` | `Match Group add-ai-user` + `ForceCommand` |
+| `/etc/systemd/system/add-ai-user-janitor@.{service,timer}` | one janitor timer per account |
 | `~/.config/tmux/tmux.conf` | link to Oh my tmux! |
 | `~/.config/tmux/tmux.conf.local` | the account's tmux settings |
 | `~/tmux-logs/` | the recordings |
@@ -185,7 +194,7 @@ Per account: `~/.ai/con-refused.txt` (refusal message) and
 ## Tests
 
 ```bash
-tests/test-gate.sh    # 47+ commands the gate must refuse or allow (run as an addai user)
+tests/test-gate.sh    # 47+ commands the gate must refuse or allow (run as an add-ai-user account)
 tests/test-logs.sh    # pane-logger chunks and janitor rules, in a temporary directory
 ```
 

@@ -1,6 +1,6 @@
 #!/usr/bin/python3
-"""addai ssh-gate: SSH ForceCommand of the members of the "addai" group
-(/etc/ssh/sshd_config.d/60-addai.conf).
+"""add-ai-user ssh-gate: SSH ForceCommand of the members of the "add-ai-user" group
+(/etc/ssh/sshd_config.d/60-add-ai-user.conf).
 
 Every SSH session of these accounts has to go through their default tmux server, so that
 the owner can watch, at any time, what an AI is doing (and read it back in ~/tmux-logs).
@@ -22,14 +22,14 @@ import subprocess
 import sys
 import syslog
 
-CONF = "/etc/addai/addai.conf"
+CONF = "/etc/add-ai-user/add-ai-user.conf"
 CUSTOM_MESSAGE = "~/.ai/con-refused.txt"
 CUSTOM_MESSAGE_MAX = 64 * 1024
 TMUX = shutil.which("tmux") or "/usr/bin/tmux"
 
 
 def read_conf(path=CONF):
-    """KEY=VALUE lines of the shell-style addai.conf (comments and quotes allowed)."""
+    """KEY=VALUE lines of the shell-style add-ai-user.conf (comments and quotes allowed)."""
     conf = {}
     try:
         with open(path, encoding="utf-8") as f:
@@ -264,7 +264,7 @@ def check_tmux(args):
 
 
 def main():
-    syslog.openlog("addai-gate", 0, syslog.LOG_AUTHPRIV)
+    syslog.openlog("add-ai-user-gate", 0, syslog.LOG_AUTHPRIV)
     command = os.environ.get("SSH_ORIGINAL_COMMAND", "").strip()
     try:
         if not command:

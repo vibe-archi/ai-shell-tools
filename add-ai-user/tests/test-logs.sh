@@ -1,10 +1,10 @@
 #!/bin/bash
 # test-logs.sh: pane-logger chunking + tmux-logs-janitor (compress, expire, cap) in a temp dir
-lib=${ADDAI_LIB:-/usr/local/lib/addai}
+lib=${ADD_AI_USER_LIB:-/usr/local/lib/add-ai-user}
 d=$(mktemp -d) && mkdir -p "$d/s"
 
 echo "== pane-logger: 3336 bytes, chunks of 1000"
-head -c 2500 /dev/urandom | base64 -w0 | ADDAI_CONF=/dev/null LOG_CHUNK_BYTES=1000 "$lib/tmux/pane-logger" "$d/s/x"
+head -c 2500 /dev/urandom | base64 -w0 | ADD_AI_USER_CONF=/dev/null LOG_CHUNK_BYTES=1000 "$lib/tmux/pane-logger" "$d/s/x"
 ls -l "$d/s" | awk 'NR > 1 { print $5, $9 }'
 rm -f "$d"/s/*
 
@@ -17,6 +17,6 @@ for i in 1 2 3; do head -c 100000 /dev/urandom | gzip > "$d/s/old$i.log.gz"; tou
 echo x | gzip > "$d/s/expired.log.gz"; touch -d '40 days ago' "$d/s/expired.log.gz"
 sleep 1
 echo "before:"; ls "$d/s" | tr '\n' ' '; echo
-ADDAI_CONF=/dev/null LOG_DIR=$d LOG_MAX_TOTAL_BYTES=450000 "$lib/tmux-logs-janitor"
+ADD_AI_USER_CONF=/dev/null LOG_DIR=$d LOG_MAX_TOTAL_BYTES=450000 "$lib/tmux-logs-janitor"
 echo "after:"; ls "$d/s" | tr '\n' ' '; echo; du -sb "$d" | cut -f1
 kill %1 2>/dev/null; rm -rf "$d"

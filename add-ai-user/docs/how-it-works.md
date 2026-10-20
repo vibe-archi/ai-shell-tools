@@ -18,11 +18,11 @@ anything the account can do, including deleting its own logs.
 
 ### Where it plugs in
 
-`/etc/ssh/sshd_config.d/60-addai.conf`:
+`/etc/ssh/sshd_config.d/60-add-ai-user.conf`:
 
 ```
-Match Group addai
-    ForceCommand /usr/local/lib/addai/ssh-gate
+Match Group add-ai-user
+    ForceCommand /usr/local/lib/add-ai-user/ssh-gate
 Match all
 ```
 
@@ -35,7 +35,7 @@ so the panes themselves would be refused; `su`, `sudo -iu`, cron... would break 
 
 ### What the gate does
 
-`/usr/local/lib/addai/ssh-gate` (Python 3, no dependencies):
+`/usr/local/lib/add-ai-user/ssh-gate` (Python 3, no dependencies):
 
 1. Empty command: refused ("direct connection without tmux").
 2. The sftp subsystem (`.../sftp-server`, `internal-sftp`): allowed, so scp (which uses
@@ -65,7 +65,7 @@ so the panes themselves would be refused; `su`, `sudo -iu`, cron... would break 
 9. Allowed: the gate `exec`s `tmux -u <the same arguments>`, with `LANG=C.UTF-8` when the
    client sent no UTF-8 locale (ssh from Windows sends none).
 
-Refusals and allowed commands are logged to syslog (`journalctl -t addai-gate`). A refusal
+Refusals and allowed commands are logged to syslog (`journalctl -t add-ai-user-gate`). A refusal
 prints the standard message, followed by the content of `~/.ai/con-refused.txt` when the
 file exists (up to 64 KB).
 
@@ -76,9 +76,9 @@ custom message when there is one.
 
 ```
 tmux hook (after-new-session / after-new-window / after-split-window, config load)
-  -> /usr/local/lib/addai/tmux/log-panes
+  -> /usr/local/lib/add-ai-user/tmux/log-panes
        for each pane not recorded yet: tmux pipe-pane -o "pane-logger <base>"
-  -> /usr/local/lib/addai/tmux/pane-logger <base>
+  -> /usr/local/lib/add-ai-user/tmux/pane-logger <base>
        stdin (everything the pane displays) -> <base>.001.log, .002.log, ...
 ```
 
@@ -98,7 +98,7 @@ the terminal redraws them as they were.
 
 ## 3. The janitor
 
-`addai-janitor@<user>.timer` runs `/usr/local/lib/addai/tmux-logs-janitor` as `<user>`
+`add-ai-user-janitor@<user>.timer` runs `/usr/local/lib/add-ai-user/tmux-logs-janitor` as `<user>`
 every 2 minutes:
 
 1. Compresses (gzip) every `.log` that no process has open (it reads the symlinks of
@@ -134,7 +134,7 @@ byobu's best parts ported into `tmux.conf.local`:
   The gate and `~/.bashrc` set `LANG=C.UTF-8` when needed, and `tmux.conf.local` sets it
   in tmux's global environment for popups and editors.
 
-Oh my tmux! is cloned once in `/usr/local/lib/addai/oh-my-tmux` and linked from every
+Oh my tmux! is cloned once in `/usr/local/lib/add-ai-user/oh-my-tmux` and linked from every
 account's `~/.config/tmux/tmux.conf`; running `add-ai-user.sh` again updates it.
 
 ## 5. Working as an agent through the gate

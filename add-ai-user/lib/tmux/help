@@ -1,6 +1,6 @@
 #!/bin/sh
 # F1: cheat sheet of the byobu-style bindings set in ~/.config/tmux/tmux.conf.local
-# (template: /usr/local/lib/addai/tmux/tmux.conf.local)
+# (template: /usr/local/lib/add-ai-user/tmux/tmux.conf.local)
 # Layout: section titles start at column 3, keys at column 5 (keys contain no
 # double space, that's what separates them from the description).
 esc=$(printf '\033')

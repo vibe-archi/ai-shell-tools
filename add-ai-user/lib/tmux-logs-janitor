@@ -1,12 +1,12 @@
 #!/bin/bash
-# tmux-logs-janitor: run every 2 minutes for each addai user by the timer
-# addai-janitor@<user>.timer:
+# tmux-logs-janitor: run every 2 minutes for each add-ai-user account by the timer
+# add-ai-user-janitor@<user>.timer:
 #   1. gzip the pane logs that pane-logger has closed
 #   2. delete the logs older than LOG_KEEP_DAYS
 #   3. keep ~/tmux-logs under LOG_MAX_TOTAL_MB, deleting the oldest compressed logs first
-# Settings: /etc/addai/addai.conf
+# Settings: /etc/add-ai-user/add-ai-user.conf
 set -u
-conf=${ADDAI_CONF:-/etc/addai/addai.conf}
+conf=${ADD_AI_USER_CONF:-/etc/add-ai-user/add-ai-user.conf}
 [ -r "$conf" ] && . "$conf"
 dir=${LOG_DIR:-$HOME/tmux-logs}
 keep_days=${LOG_KEEP_DAYS:-30}
