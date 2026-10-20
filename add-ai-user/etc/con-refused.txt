@@ -1,0 +1,13 @@
+  Rules for AI agents on this account:
+
+  1. Name your tmux session after your task: short and descriptive, lowercase
+     words separated by dashes (fix-login-bug, deploy-api, review-pr-42), never
+     a generic name such as "work", "main" or "s1".
+
+  2. As soon as the session exists, give your user its name and the command to
+     watch it from outside, in case they want to:
+
+       ssh -t {user}@{host} tmux attach -r -t <session>
+
+     (-r is read-only: they see everything without typing into your session.
+     F6 or Ctrl+b d detaches.)

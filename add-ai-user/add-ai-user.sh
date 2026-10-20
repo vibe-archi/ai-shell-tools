@@ -23,8 +23,11 @@ Options:
                         Without --key, if the user has no key yet, it is asked for:
                         paste it, then confirm it or enter it again
       --no-key          don't ask for a key (password login, or keys added later)
-  -m, --message <file>  text shown below the "connection refused" message, copied to
-                        ~<user>/.ai/con-refused.txt
+  -m, --message <file>  rules shown below the "connection refused" message, copied to
+                        ~<user>/.ai/con-refused.txt ({user} and {host} are replaced).
+                        Without it, an account that has no rules yet gets the default
+                        ones (/etc/add-ai-user/con-refused.txt); "--message default"
+                        applies them again
   -p, --password        set the user's password (asked interactively)
   -s, --sudo            add the user to the sudo group (asks for a password if it has none)
   -u, --update          <user> already exists: (re)apply the add-ai-user setup to it
@@ -93,7 +96,9 @@ install_system() {
     git clone -q --single-branch "$OMT_REPO" "$LIB/oh-my-tmux"
   fi
 
+  # settings and default rules: installed once, then they are the admin's to edit
   [ -f "$CONF_DIR/add-ai-user.conf" ] || install -m 644 "$SRC/etc/add-ai-user.conf" "$CONF_DIR/add-ai-user.conf"
+  [ -f "$CONF_DIR/con-refused.txt" ] || install -m 644 "$SRC/etc/con-refused.txt" "$CONF_DIR/con-refused.txt"
   [ -z "$HOST_NAME" ] || sed -i "s|^SSH_HOST=.*|SSH_HOST=$HOST_NAME|" "$CONF_DIR/add-ai-user.conf"
 
   install -m 644 "$SRC/systemd/add-ai-user-janitor@.service" "$SRC/systemd/add-ai-user-janitor@.timer" "$UNITS/"
@@ -211,10 +216,17 @@ case "\${LC_ALL:-\${LC_CTYPE:-\$LANG}}" in *[Uu][Tt][Ff]-8*|*[Uu][Tt][Ff]8*) ;; 
 EOF
   fi
 
-  if [ -n "$MESSAGE" ]; then
-    say "Custom refusal message: ~/.ai/con-refused.txt"
+  local host rules=$HOME_DIR/.ai/con-refused.txt source=''
+  host=$(. "$CONF_DIR/add-ai-user.conf"; echo "${SSH_HOST:-$(hostname -f)}")
+  if [ "$MESSAGE" = default ] || { [ -z "$MESSAGE" ] && [ ! -e "$rules" ]; }; then
+    source=$CONF_DIR/con-refused.txt
+  elif [ -n "$MESSAGE" ]; then
+    source=$MESSAGE
+  fi
+  if [ -n "$source" ]; then
+    say "Rules shown to refused connections: ~/.ai/con-refused.txt (from $source)"
     as_user mkdir -p "$HOME_DIR/.ai"
-    as_user tee "$HOME_DIR/.ai/con-refused.txt" >/dev/null < "$MESSAGE"
+    sed "s/{user}/$USER_NAME/g; s/{host}/$host/g" "$source" | as_user tee "$rules" >/dev/null
   fi
 
   systemctl enable --now --quiet "add-ai-user-janitor@$USER_NAME.timer"
@@ -222,17 +234,17 @@ EOF
     as_user tmux source-file "$HOME_DIR/.config/tmux/tmux.conf" && say "Reloaded the running tmux of $USER_NAME"
   fi
 
-  local host
-  host=$(. "$CONF_DIR/add-ai-user.conf"; echo "${SSH_HOST:-$(hostname -f)}")
   if ! [ -s "$HOME_DIR/.ssh/authorized_keys" ] && [ "$(passwd -S "$USER_NAME" | cut -d' ' -f2)" != P ]; then
     warn "$USER_NAME has neither an SSH key nor a password: nobody can log in yet (see --key)"
   fi
   say "Done. $USER_NAME works through tmux:"
   cat <<EOF
     human: ssh -t $USER_NAME@$host tmux new -A -s main
-    AI:    ssh $USER_NAME@$host tmux new -d -s work
-           ssh $USER_NAME@$host "tmux send-keys -t work '<command>' Enter"
-           ssh $USER_NAME@$host tmux capture-pane -p -t work
+    AI:    ssh $USER_NAME@$host tmux new -d -s <session>      (e.g. fix-login-bug)
+           ssh $USER_NAME@$host "tmux send-keys -t <session> '<command>' Enter"
+           ssh $USER_NAME@$host tmux capture-pane -p -t <session>
+    watch: ssh -t $USER_NAME@$host tmux attach -r -t <session>
+    rules: $rules
     logs:  $HOME_DIR/tmux-logs (read them with tmux-logs)
 EOF
 }
@@ -284,7 +296,7 @@ done
 
 [ "$(id -u)" -eq 0 ] || die "run me as root (sudo $0 ...)"
 [ -z "$HOST_NAME" ] || [[ $HOST_NAME =~ ^[A-Za-z0-9.-]+$ ]] || die "invalid host name: $HOST_NAME"
-[ -z "$MESSAGE" ] || [ -r "$MESSAGE" ] || die "cannot read $MESSAGE"
+[ -z "$MESSAGE" ] || [ "$MESSAGE" = default ] || [ -r "$MESSAGE" ] || die "cannot read $MESSAGE"
 ((${#KEYS[@]} == 0)) || check_keys
 
 case $ACTION in
