@@ -1,0 +1,15 @@
+#!/bin/sh
+# Run by tmux hooks (new session/window/pane, config load): start recording every pane
+# that isn't recorded yet, into ~/tmux-logs/<session>/<start>_w<window>p<pane>_<id>.NNN.log
+dir=${LOG_DIR:-$HOME/tmux-logs}
+logger=${ADDAI_LIB:-/usr/local/lib/addai}/tmux/pane-logger
+
+tmux list-panes -a -F '#{pane_pipe} #{pane_id} #{window_index} #{pane_index} #{session_name}' |
+while read -r piped id win pane session; do
+  [ "$piped" = 1 ] && continue
+  safe=$(printf '%s' "$session" | tr -c 'A-Za-z0-9._-' '_')
+  mkdir -p "$dir/$safe"
+  base="$dir/$safe/$(date +%Y-%m-%d_%H%M%S)_w${win}p${pane}_${id#%}"
+  # -o: no-op if another hook started the recording in the meantime
+  tmux pipe-pane -o -t "$id" "exec $logger '$base'"
+done

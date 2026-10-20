@@ -1,0 +1,25 @@
+#!/bin/sh
+# pane-logger <base>: record a tmux pane's output (stdin) into <base>.001.log, .002.log...
+# starting a new file every LOG_CHUNK_MB, so that tmux-logs-janitor can compress the
+# closed ones. Stops writing (but keeps draining) while the disk has less than
+# LOG_MIN_FREE_MB free. Settings: /etc/addai/addai.conf
+base=$1
+conf=${ADDAI_CONF:-/etc/addai/addai.conf}
+[ -r "$conf" ] && . "$conf"
+chunk=${LOG_CHUNK_BYTES:-$(( ${LOG_CHUNK_MB:-50} * 1048576 ))}
+min_free_kb=$(( ${LOG_MIN_FREE_MB:-2048} * 1024 ))
+
+n=1
+while :; do
+  f=$(printf '%s.%03d.log' "$base" "$n")
+  if [ "$(df -Pk "$(dirname "$base")" | awk 'NR == 2 { print $4 }')" -lt "$min_free_kb" ]; then
+    echo "$(date '+%F %T') low disk space: recording suspended" >> "$base.SUSPENDED"
+    size=$(head -c "$chunk" | wc -c)
+  else
+    head -c "$chunk" > "$f"
+    size=$(stat -c %s "$f")
+    [ "$size" -eq 0 ] && rm -f "$f"
+  fi
+  [ "$size" -lt "$chunk" ] && exit 0  # the pane is gone
+  n=$((n + 1))
+done

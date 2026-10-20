@@ -1,0 +1,19 @@
+#!/bin/sh
+# Shift+F9 / Ctrl+F9 (byobu): type the command stored in @broadcast, then Enter,
+#   broadcast panes   <window>   into every pane of the window
+#   broadcast windows <session>  into the active pane of every window of the session
+scope=$1 target=$2
+cmd=$(tmux show-option -gqv @broadcast)
+[ -n "$cmd" ] || exit 0
+
+case $scope in
+  panes)   panes=$(tmux list-panes -t "$target" -F '#{pane_id}') ;;
+  windows) panes=$(tmux list-windows -t "$target" -F '#{pane_id}') ;;
+  *)       exit 1 ;;
+esac
+
+for pane in $panes; do
+  tmux send-keys -t "$pane" -l -- "$cmd"
+  tmux send-keys -t "$pane" Enter
+done
+tmux set -gu @broadcast

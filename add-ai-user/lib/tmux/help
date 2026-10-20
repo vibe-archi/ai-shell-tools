@@ -1,0 +1,86 @@
+#!/bin/sh
+# F1: cheat sheet of the byobu-style bindings set in ~/.config/tmux/tmux.conf.local
+# (template: /usr/local/lib/addai/tmux/tmux.conf.local)
+# Layout: section titles start at column 3, keys at column 5 (keys contain no
+# double space, that's what separates them from the description).
+esc=$(printf '\033')
+title="${esc}[1;38;5;39m" head="${esc}[1;38;5;214m" key="${esc}[38;5;227m" off="${esc}[0m"
+
+sed -e "1s/.*/${title}&${off}/" \
+    -e "s/^  \([^ ].*\)$/  ${head}\1${off}/" \
+    -e "s/^    \([^ ]\{1,\}\( [^ ]\{1,\}\)*\)/    ${key}\1${off}/" <<'EOF' | less -R -K -~ -Ps' q to close '
+ ❐ tmux · byobu-style key bindings                     (Oh my tmux!)
+
+  WINDOWS (tabs)
+    F2                    new window, in the current directory
+    F3 / F4               previous / next window
+    Alt+← / Alt+→         previous / next window
+    Ctrl+Shift+F3 / F4    move the window left / right
+    F8                    rename the window
+    click on a tab        go to that window
+
+  PANES (splits)
+    Ctrl+F2               split: side by side
+    Shift+F2              split: top / bottom
+    Shift+← ↑ → ↓         go to the neighbouring pane (or click it)
+    Shift+F3 / F4         previous / next pane
+    Ctrl+F3 / F4          swap with the previous / next pane
+    Alt+Shift+← ↑ → ↓     resize (or drag the border)
+    Shift+F8              next layout
+    Shift+F11             zoom / unzoom the pane
+    Alt+F11               move the pane to its own window
+    Ctrl+F11              join the pane to the previous window
+    Ctrl+F6               close the pane
+
+  SESSIONS
+    Ctrl+Shift+F2         new session
+    Alt+↑ / Alt+↓         previous / next session
+    Ctrl+F8               rename the session
+    F6                    detach (everything keeps running)
+    Alt+F6                detach the other connected terminals
+    tmux a                (in the shell) attach again
+
+  SCROLLING AND COPY
+    mouse wheel           scroll back in the history
+    F7                    copy mode: ↑ ↓ PgUp PgDn, / search, q quit
+    Alt+PgUp / PgDn       scroll one page up / down
+    Space then Enter      (copy mode) start the selection, then copy
+    Alt+Insert            paste what was copied
+    Shift+F7              open the whole pane history in nano
+    Shift+drag            terminal selection, to copy to your computer
+
+  MISC
+    F9                    menu: mouse, sync, status bar, configuration
+    F5                    reload the configuration
+    Shift+F9              type a command in every pane of the window
+    Ctrl+F9               type a command in every window
+    Alt+F9                synchronize typing across panes (on/off)
+    Alt+F12               mouse on/off
+    Shift+F12             F-keys on/off (for htop, mc, vim...)
+    Shift+F1              every tmux key binding
+
+  PREFIX: Ctrl+b or F12, then
+    c                     new window
+    - / _                 split: top / bottom, side by side
+    h j k l               go to the neighbouring pane
+    H J K L               resize
+    +                     maximize the pane
+    e                     edit the configuration
+    r                     reload the configuration
+    d                     detach
+    :                     tmux command line
+    ?                     every key binding
+
+  LOGS (everything displayed is recorded in ~/tmux-logs)
+    tmux-logs             the 20 most recent logs
+    tmux-logs view <name>  read a log (q to quit)
+    tmux-logs replay <name>  replay a log (full-screen apps)
+    tmux-logs grep <pattern>  search every log
+    tmux-logs du          space used per session
+
+  STATUS BAR
+    ⌨                     prefix waiting for a key
+    ↗                     mouse enabled
+    ⚏                     typing synchronized across panes
+    F-keys OFF            F-keys disabled (Shift+F12)
+EOF

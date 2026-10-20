@@ -1,0 +1,34 @@
+#!/bin/sh
+# tmux-logs: read back the pane recordings of ~/tmux-logs
+#   tmux-logs [N]             the N most recent logs (20 by default)
+#   tmux-logs view <log>      read a log in less (colours kept, q to quit)
+#   tmux-logs replay <log>    print it raw in the terminal: full-screen apps
+#                             (htop, Claude Code, Codex...) are redrawn as they were
+#   tmux-logs grep <pattern>  search every log, colours stripped
+#   tmux-logs du              space used per session
+# <log> is a path, or a part of its name (the most recent match is used).
+dir=${LOG_DIR:-$HOME/tmux-logs}
+
+pick() {
+  [ -f "$1" ] && { printf '%s\n' "$1"; return; }
+  f=$(find "$dir" -type f -name "*$1*" -printf '%T@ %p\n' | sort -rn | head -1 | cut -d' ' -f2-)
+  [ -n "$f" ] || { echo "tmux-logs: no log matches '$1'" >&2; exit 1; }
+  printf '%s\n' "$f"
+}
+strip() { sed 's/\x1b\[[0-9;?]*[ -\/]*[@-~]//g; s/\x1b[]P][^\x07\x1b]*\(\x07\|\x1b\\\)//g; s/\r//g'; }
+
+case ${1:-} in
+  view)   f=$(pick "${2:?log}") && zless -R -- "$f" ;;
+  replay) f=$(pick "${2:?log}") && zcat -f -- "$f" ;;
+  grep)
+    pattern=${2:?pattern}
+    find "$dir" -type f \( -name '*.log' -o -name '*.log.gz' \) -printf '%T@ %p\n' | sort -n | cut -d' ' -f2- |
+    while IFS= read -r f; do
+      zcat -f -- "$f" | strip | grep -a -n -- "$pattern" | sed "s|^|${f#"$dir"/}:|"
+    done ;;
+  du)     du -sh "$dir"/* 2>/dev/null; du -sh "$dir" ;;
+  ''|[0-9]*)
+    find "$dir" -type f \( -name '*.log' -o -name '*.log.gz' \) -printf '%T@ %TY-%Tm-%Td %TH:%TM %s %P\n' |
+      sort -rn | head -n "${1:-20}" | cut -d' ' -f2- | numfmt --field=3 --to=iec --padding=6 ;;
+  *) sed -n '2,9s/^# \{0,1\}//p' "$0"; exit 1 ;;
+esac
