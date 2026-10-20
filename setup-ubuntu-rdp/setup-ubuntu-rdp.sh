@@ -491,11 +491,26 @@ choose_user() {  # account of the desktop: --user, the previous run's, else aske
     [[ -z $RDP_USER ]] || return 0
     RDP_USER=desktop
     has_tty || return 0
-    local reply
+    local reply answer
     while :; do
         reply=$(ask 'Linux account of the desktop, created if needed [desktop]: ')
-        if valid_user "${reply:-desktop}"; then RDP_USER=${reply:-desktop}; return 0; fi
-        printf 'Invalid name: lowercase letters, digits, _ and -, not root.\n' >/dev/tty
+        reply=${reply:-desktop}
+        if ! valid_user "$reply"; then
+            printf 'Invalid name: lowercase letters, digits, _ and -, not root.\n' >/dev/tty
+            continue
+        fi
+        if getent passwd "$reply" >/dev/null; then
+            printf '%s already exists.' "$reply" >/dev/tty
+            if id -nG "$reply" | tr ' ' '\n' | grep -qxE 'sudo|admin|wheel'; then
+                printf ' It can use sudo: its desktop sessions would have admin rights.' >/dev/tty
+            fi
+            answer=$(ask $'\n'"Use $reply for the desktop? [y/N] ")
+            [[ $answer == [yY]* ]] || continue
+            answer=$(ask "Set a new password for $reply? (no = keep its current one) [y/N] ")
+            if [[ $answer == [yY]* ]]; then RESET_PASSWORD=1; fi
+        fi
+        RDP_USER=$reply
+        return 0
     done
 }
 
@@ -1009,35 +1024,39 @@ Server setup done
   Backups         : $BACKUP
   Log             : $LOG
 END
+    local target
     if [[ $ACCESS == local ]]; then
+        target=127.0.0.1:13389
         cat <<END
   RDP             : 127.0.0.1:$PORT, through an SSH tunnel
 
-In a Windows PowerShell, open this tunnel and keep it open (adapt the account,
-the -i key and -p port to your usual SSH connection):
+RDP is only reachable through an SSH tunnel, whatever your computer runs.
+On your computer (Windows, Linux or macOS), open it in a terminal and keep it
+open while you use the desktop (SSH_USER = an account you reach over SSH; add
+-i KEY or -p PORT as for your usual SSH connection):
 
-  ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -L 127.0.0.1:13389:127.0.0.1:$PORT SSH_USER@${address:-UBUNTU_IP}
+  ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -L 127.0.0.1:13389:127.0.0.1:$PORT SSH_USER@${address:-SERVER_IP}
 
-Then, in ANOTHER Windows terminal:
-
-  mstsc /v:127.0.0.1:13389 /w:1920 /h:1080
-
-Or, with the SDL FreeRDP client:
-
-  .\sdl-freerdp.exe /v:127.0.0.1:13389 /u:$RDP_USER /size:1920x1080 /dynamic-resolution +clipboard
+Then connect an RDP client to $target as $RDP_USER:
 END
     else
+        target=${address:-SERVER_IP}:$PORT
         cat <<END
   RDP             : port $PORT on every interface (public)${ALLOW_FROM:+, only from $ALLOW_FROM}
   fail2ban        : $( (( FAIL2BAN )) && echo "$F2B_MAXRETRY failed logins in $F2B_FINDTIME = banned for $F2B_BANTIME (jail $F2B_JAIL)" || echo "disabled (--no-fail2ban)")
 
-From Windows:
+Connect an RDP client to $target as $RDP_USER:
+END
+    fi
+    cat <<END
 
-  mstsc /v:${address:-UBUNTU_IP}:$PORT /w:1920 /h:1080
-
-Or, with the SDL FreeRDP client:
-
-  .\sdl-freerdp.exe /v:${address:-UBUNTU_IP}:$PORT /u:$RDP_USER /size:1920x1080 /dynamic-resolution +clipboard
+  Windows : mstsc /v:$target
+  Linux   : xfreerdp3 /v:$target /u:$RDP_USER /dynamic-resolution +clipboard
+            (xfreerdp with FreeRDP 2), or Remmina: new RDP connection to $target
+  macOS   : Windows App (Microsoft), add a PC: $target
+END
+    if [[ $ACCESS == public ]]; then
+        cat <<END
 
 Public RDP: anyone who can reach port $PORT can try passwords. Keep a long,
 unique password, restrict the port to your address (--allow-from, or your

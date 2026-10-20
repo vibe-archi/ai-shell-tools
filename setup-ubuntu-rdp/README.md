@@ -34,18 +34,25 @@ sudo ./setup-ubuntu-rdp.sh   # asks: account name, SSH tunnel or public RDP, pas
 
 ## Connecting
 
-Through an SSH tunnel, from Windows (keep the first command running):
+Any RDP client works, on Windows, Linux or macOS.
 
-```powershell
+**SSH tunnel mode**: RDP only listens on the server's `127.0.0.1`, so whatever your
+computer runs, first open a tunnel and keep it open while you use the desktop (any
+account you reach over SSH; add `-i key` or `-p port` as usual):
+
+```bash
 ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:13389:127.0.0.1:3389 you@server.example.com
-mstsc /v:127.0.0.1:13389
 ```
 
-In public mode:
+then connect the RDP client to `127.0.0.1:13389`.
 
-```powershell
-mstsc /v:server.example.com:3389
-```
+**Public mode**: connect the RDP client to `server.example.com:3389` directly.
+
+| Your computer | RDP client |
+| --- | --- |
+| Windows | `mstsc /v:127.0.0.1:13389` (Remote Desktop Connection, built in) |
+| Linux | `xfreerdp3 /v:127.0.0.1:13389 /u:desktop /dynamic-resolution +clipboard` (FreeRDP 3; `xfreerdp` with FreeRDP 2), or Remmina |
+| macOS | Windows App (Microsoft), add a PC: `127.0.0.1:13389` |
 
 Log in with the desktop account and its password. The certificate is self-signed, so
 the client shows a warning the first time.
