@@ -67,9 +67,22 @@ the client shows a warning the first time.
   --chrome-apparmor MODE   auto | on | off
 ```
 
-Running the script again is safe: it updates what needs to be, switches between local
-and public access (the ufw rule follows), and rebuilds the backport when newer sources
-are published. Run it over SSH or a console, after logging out of the desktop.
+Running the script again is safe: it updates what needs to be and rebuilds the backport
+when newer sources are published. It remembers your choices (account, access mode, port,
+address restriction, locale, fail2ban) in `/etc/setup-ubuntu-rdp/settings`, so a plain
+re-run keeps them; options change them. Run it over SSH or a console, after logging out
+of the desktop (menu > Log Out: a mere disconnection keeps the session running).
+
+Switching the access mode later:
+
+```bash
+sudo ./setup-ubuntu-rdp.sh --public                          # tunnel -> public
+sudo ./setup-ubuntu-rdp.sh --public --allow-from 203.0.113.7 # public, from one address
+sudo ./setup-ubuntu-rdp.sh --allow-from any                  # lift the restriction
+sudo ./setup-ubuntu-rdp.sh --local                           # back to the SSH tunnel
+```
+
+The ufw rule and the fail2ban jail follow the mode.
 
 Exit codes: `0` everything checked, `2` done with warnings, anything else: stopped (see
 the log in `/var/log/setup-ubuntu-rdp/`). Modified files are backed up in

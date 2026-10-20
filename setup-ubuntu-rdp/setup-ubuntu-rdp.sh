@@ -24,18 +24,20 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 MIN_XRDP=0.10.6.1
 MIN_XORGXRDP=0.10.5
-RDP_USER=desktop
+# Empty settings come from the previous run (SETTINGS), else from their defaults.
+RDP_USER=''          # default: desktop
+ACCESS=''            # local | public, default: asked
+PORT=''              # default: 3389
+ALLOW_FROM=''        # "any" on the command line clears a saved restriction
+SESSION_LOCALE=''    # default: the system's if UTF-8, else C.UTF-8
+FAIL2BAN=''          # default: 1
+SETTINGS=/etc/setup-ubuntu-rdp/settings
 RDP_GROUP=rdp-users
 SOURCE=auto
-ACCESS=''
-PORT=3389
-ALLOW_FROM=''
-SESSION_LOCALE=''
 INSTALL_CHROME=1
 APPARMOR_MODE=auto
 RESET_PASSWORD=0
 KEEP_BUILD_DEPS=0
-FAIL2BAN=1
 F2B_JAIL=xrdp-authfail
 F2B_MAXRETRY=5
 F2B_FINDTIME=10m
@@ -66,11 +68,12 @@ Usage: sudo bash setup-ubuntu-rdp.sh [options]
                            when there is no terminal to ask).
   --allow-from ADDRESS     With --public: only accept RDP from this IP address or
                            network (e.g. 203.0.113.7 or 203.0.113.0/24). Needs an
-                           active ufw firewall.
+                           active ufw firewall. "--allow-from any" lifts it.
   --port N                 RDP port (default: 3389).
   --no-fail2ban            With --public: don't install the fail2ban jail that bans
                            for 1 hour an address with 5 failed RDP logins in 10
                            minutes (installed by default in public mode).
+  --fail2ban               Put the fail2ban jail back after --no-fail2ban.
   --locale NAME            UTF-8 locale of the desktop session, e.g. fr_FR.UTF-8
                            (default: the system's when it is UTF-8, else C.UTF-8).
   --source MODE            Where xrdp and xorgxrdp come from:
@@ -106,7 +109,10 @@ passwords are kept.
 
 Running it again: do it over SSH or a console, after LOGGING OUT of the XFCE
 session. The script refuses to run while an xrdp-chansrv process exists. It
-restarts the xrdp services but doesn't kill user sessions.
+restarts the xrdp services but doesn't kill user sessions. It reuses the
+choices of the previous run (account, access mode, port, address restriction,
+locale, fail2ban: /etc/setup-ubuntu-rdp/settings); options change them, e.g.
+--public or --local to switch the access mode.
 
 Modified files are backed up; this is not a package rollback nor a snapshot.
 Take a Proxmox snapshot before using it on a machine with important work.
@@ -498,7 +504,11 @@ EOF
         esac
     done
     if [[ $ACCESS == public && -z $ALLOW_FROM ]] && ufw_enabled; then
-        ALLOW_FROM=$(ask 'Only accept RDP from this IP address or network (empty = from anywhere): ')
+        while :; do
+            ALLOW_FROM=$(ask 'Only accept RDP from this IP address or network (empty = from anywhere): ')
+            [[ -z $ALLOW_FROM || $ALLOW_FROM =~ ^[0-9A-Fa-f:.]+(/[0-9]{1,3})?$ ]] && break
+            printf 'Not an address: use something like 203.0.113.7 or 203.0.113.0/24.\n' >/dev/tty
+        done
     fi
 }
 
@@ -663,6 +673,38 @@ configure_chrome_apparmor() {
     fi
 }
 
+# -- settings of the previous run ----------------------------------------------
+
+load_settings() {  # fill what the command line left empty with the previous run's choices
+    [[ -r $SETTINGS ]] || return 0
+    local key value
+    while IFS='=' read -r key value; do
+        case $key in
+            RDP_USER)       RDP_USER=${RDP_USER:-$value} ;;
+            ACCESS)         ACCESS=${ACCESS:-$value} ;;
+            PORT)           PORT=${PORT:-$value} ;;
+            ALLOW_FROM)     ALLOW_FROM=${ALLOW_FROM:-$value} ;;
+            SESSION_LOCALE) SESSION_LOCALE=${SESSION_LOCALE:-$value} ;;
+            FAIL2BAN)       FAIL2BAN=${FAIL2BAN:-$value} ;;
+        esac
+    done < "$SETTINGS"
+}
+
+save_settings() {
+    install -d -m 0755 "${SETTINGS%/*}"
+    cat > "$SETTINGS" <<EOF
+# setup-ubuntu-rdp: choices of the last run, reused by the next one.
+# Command line options win: --local / --public switch the access mode.
+RDP_USER=$RDP_USER
+ACCESS=$ACCESS
+PORT=$PORT
+ALLOW_FROM=$ALLOW_FROM
+SESSION_LOCALE=$SESSION_LOCALE
+FAIL2BAN=$FAIL2BAN
+EOF
+    chmod 0644 "$SETTINGS"
+}
+
 # -- main ----------------------------------------------------------------------
 
 main() {
@@ -673,6 +715,7 @@ main() {
             --reset-password) RESET_PASSWORD=1; shift ;;
             --keep-build-deps) KEEP_BUILD_DEPS=1; shift ;;
             --no-fail2ban) FAIL2BAN=0; shift ;;
+            --fail2ban) FAIL2BAN=1; shift ;;
             --local) ACCESS=local; shift ;;
             --public) ACCESS=public; shift ;;
             --user|--chrome-apparmor|--source|--port|--allow-from|--locale)
@@ -691,12 +734,16 @@ main() {
         esac
     done
     if [[ -n $ALLOW_FROM && -z $ACCESS ]]; then ACCESS=public; fi
+    load_settings
+    [[ $ALLOW_FROM != any ]] || ALLOW_FROM=''  # kept in local mode, for a later --public
+    RDP_USER=${RDP_USER:-desktop}
+    PORT=${PORT:-3389}
+    FAIL2BAN=${FAIL2BAN:-1}
     [[ $RDP_USER =~ ^[a-z_][a-z0-9_-]{0,30}$ && $RDP_USER != root ]] || die 'Invalid user name.'
     [[ $APPARMOR_MODE =~ ^(auto|on|off)$ ]] || die 'Invalid --chrome-apparmor mode.'
     [[ $SOURCE =~ ^(auto|repo|backport|ppa)$ ]] || die 'Invalid --source mode.'
     [[ $PORT =~ ^[0-9]+$ ]] && (( PORT >= 1 && PORT <= 65535 )) || die 'Invalid port.'
     [[ -z $ALLOW_FROM || $ALLOW_FROM =~ ^[0-9A-Fa-f:.]+(/[0-9]{1,3})?$ ]] || die 'Invalid --allow-from address.'
-    [[ -z $ALLOW_FROM || $ACCESS != local ]] || die '--allow-from only makes sense with --public.'
     [[ -z $SESSION_LOCALE || $SESSION_LOCALE =~ ^[A-Za-z_@]+\.[Uu][Tt][Ff]-?8$ ]] || die 'Invalid --locale (expected a UTF-8 locale such as fr_FR.UTF-8).'
     (( EUID == 0 )) || die "Run it as root: sudo bash $0"
     [[ -r /etc/os-release ]] || die 'Cannot detect the distribution.'
@@ -728,7 +775,7 @@ main() {
         (( $(id -u "$RDP_USER") >= 1000 )) || die 'The chosen account is a system account.'
     fi
     choose_access
-    if [[ -n $ALLOW_FROM ]] && ! ufw_enabled; then
+    if [[ $ACCESS == public && -n $ALLOW_FROM ]] && ! ufw_enabled; then
         die "--allow-from needs an active ufw firewall (allow SSH, then: ufw enable), or drop it."
     fi
 
@@ -916,6 +963,7 @@ SESSION
     wait_for_listener
     configure_fail2ban  # on failure, cleanup stops xrdp: no unprotected public RDP
     READY=1
+    save_settings
     say 'Final checks'
     /usr/sbin/xrdp --version
     dpkg-query -W xrdp xorgxrdp
