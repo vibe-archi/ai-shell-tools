@@ -1,0 +1,7 @@
+#!/bin/sh
+# Shift+F7 (byobu): dump the whole scrollback of a pane to a file and open it in an editor
+pane=$1
+out=${XDG_CACHE_HOME:-$HOME/.cache}/tmux-printscreen.txt
+mkdir -p "$(dirname "$out")"
+tmux capture-pane -p -J -S - -t "$pane" > "$out"
+tmux new-window -n printscreen "${VISUAL:-${EDITOR:-nano}} '$out'"

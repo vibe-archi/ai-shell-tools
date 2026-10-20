@@ -1,0 +1,9 @@
+[Unit]
+Description=add-ai-user: compress, expire and cap the tmux pane logs of %i
+
+[Service]
+Type=oneshot
+User=%i
+Nice=10
+IOSchedulingClass=idle
+ExecStart=/usr/local/lib/add-ai-user/tmux-logs-janitor

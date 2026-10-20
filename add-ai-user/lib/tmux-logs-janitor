@@ -1,0 +1,40 @@
+#!/bin/bash
+# tmux-logs-janitor: run every 2 minutes for each add-ai-user account by the timer
+# add-ai-user-janitor@<user>.timer:
+#   1. gzip the pane logs that pane-logger has closed
+#   2. delete the logs older than LOG_KEEP_DAYS
+#   3. keep ~/tmux-logs under LOG_MAX_TOTAL_MB, deleting the oldest compressed logs first
+# Settings: /etc/add-ai-user/add-ai-user.conf
+set -u
+conf=${ADD_AI_USER_CONF:-/etc/add-ai-user/add-ai-user.conf}
+[ -r "$conf" ] && . "$conf"
+dir=${LOG_DIR:-$HOME/tmux-logs}
+keep_days=${LOG_KEEP_DAYS:-30}
+max_total=${LOG_MAX_TOTAL_BYTES:-$(( ${LOG_MAX_TOTAL_MB:-2048} * 1048576 ))}
+[ -d "$dir" ] || exit 0
+
+# logs still open by a pane-logger
+declare -A open=()
+while IFS= read -r f; do open[$f]=1; done \
+  < <(find /proc/[0-9]*/fd -lname "$dir/*" -printf '%l\n' 2>/dev/null)
+
+# 1. compress closed logs (-mmin +1 skips a chunk opened after the scan above)
+while IFS= read -r -d '' f; do
+  [ -n "${open[$f]:-}" ] && continue
+  if [ -s "$f" ]; then gzip -6 -- "$f" && echo "compressed ${f#"$dir"/}"; else rm -f -- "$f"; fi
+done < <(find "$dir" -type f -name '*.log' -mmin +1 -print0)
+
+# 2. retention
+find "$dir" -type f \( -name '*.gz' -o -name '*.SUSPENDED' \) -mtime +"$((keep_days - 1))" \
+  -print -delete | sed "s|^$dir/|expired |"
+
+# 3. global cap, oldest first
+total=$(du -sb "$dir" | cut -f1)
+if [ "$total" -gt "$max_total" ]; then
+  while read -r _ size path; do
+    [ "$total" -le "$max_total" ] && break
+    rm -f -- "$path" && total=$((total - size)) && echo "over ${max_total} bytes, deleted ${path#"$dir"/}"
+  done < <(find "$dir" -type f -name '*.gz' -printf '%T@ %s %p\n' | sort -n)
+fi
+
+find "$dir" -mindepth 1 -type d -empty -mmin +1 -delete

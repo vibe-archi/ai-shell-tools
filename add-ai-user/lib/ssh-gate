@@ -1,0 +1,295 @@
+#!/usr/bin/python3
+"""add-ai-user ssh-gate: SSH ForceCommand of the members of the "add-ai-user" group
+(/etc/ssh/sshd_config.d/60-add-ai-user.conf).
+
+Every SSH session of these accounts has to go through their default tmux server, so that
+the owner can watch, at any time, what an AI is doing (and read it back in ~/tmux-logs).
+This is a usage rule, not a security boundary.
+
+  allowed  tmux <commands...> on the default server, as long as nothing runs outside a
+           visible pane; sftp (and scp, which uses sftp)
+  refused  shells and any other command, tmux -L/-S/-f/-c/-C..., run-shell & co,
+           a command given to new-session/new-window/split-window, #(...) formats
+
+When a connection is refused, the content of ~/.ai/con-refused.txt (if any) is shown
+below the standard message.
+"""
+import os
+import pwd
+import shutil
+import socket
+import subprocess
+import sys
+import syslog
+
+CONF = "/etc/add-ai-user/add-ai-user.conf"
+CUSTOM_MESSAGE = "~/.ai/con-refused.txt"
+CUSTOM_MESSAGE_MAX = 64 * 1024
+TMUX = shutil.which("tmux") or "/usr/bin/tmux"
+
+
+def read_conf(path=CONF):
+    """KEY=VALUE lines of the shell-style add-ai-user.conf (comments and quotes allowed)."""
+    conf = {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.split("#", 1)[0].strip()
+                if "=" in line:
+                    key, value = line.split("=", 1)
+                    conf[key.strip()] = value.strip().strip("'\"")
+    except OSError:
+        pass
+    return conf
+
+
+USER = pwd.getpwuid(os.getuid()).pw_name
+HOST = f"{USER}@{read_conf().get('SSH_HOST') or socket.getfqdn()}"
+
+# Global tmux flags that keep the default server
+GLOBAL_FLAGS = set("2uNlV")
+
+# tmux commands an AI may use: sessions/windows/panes, typing, reading, waiting
+ALLOWED = {
+    "attach-session", "new-session", "has-session", "list-sessions", "rename-session",
+    "kill-session", "switch-client", "detach-client", "list-clients", "refresh-client",
+    "new-window", "kill-window", "rename-window", "select-window", "next-window",
+    "previous-window", "last-window", "list-windows", "move-window", "swap-window",
+    "rotate-window", "resize-window", "select-layout", "next-layout", "previous-layout",
+    "split-window", "kill-pane", "select-pane", "last-pane", "list-panes", "resize-pane",
+    "swap-pane", "break-pane", "join-pane", "move-pane",
+    "send-keys", "capture-pane", "display-message", "wait-for", "copy-mode",
+    "set-buffer", "paste-buffer", "show-buffer", "list-buffers", "delete-buffer",
+    "load-buffer", "save-buffer", "show-options", "show-window-options",
+    "show-environment", "show-hooks", "show-messages", "list-keys", "list-commands",
+    "start-server",
+}
+
+# Options taking a value, for the commands whose flags or arguments are checked
+ARG_FLAGS = {
+    "new-session": "ceFfnstxy",
+    "new-window": "ceFnt",
+    "split-window": "ceFlt",
+    "send-keys": "cNt",
+}
+NO_COMMAND = {"new-session", "new-window", "split-window"}
+
+
+class Refused(Exception):
+    pass
+
+
+def refuse(reason):
+    command = os.environ.get("SSH_ORIGINAL_COMMAND") or "<interactive shell>"
+    client = (os.environ.get("SSH_CLIENT") or "?").split()[0]
+    syslog.syslog(syslog.LOG_NOTICE, f"refused from {client}: {command!r} ({reason})")
+    sys.stderr.write(f"""
+  Connection refused: {reason}.
+
+  On this account everything goes through tmux (default server), so that the
+  work stays visible and is logged in ~/tmux-logs.
+
+  Human: ssh -t {HOST} tmux new -A -s <name>
+  AI:    ssh {HOST} tmux new -d -s <name>
+         ssh {HOST} "tmux send-keys -t <name> '<command>' Enter"
+         ssh {HOST} tmux capture-pane -p -t <name>
+         (to run a command, type it into a tmux shell with send-keys; keep the
+         double quotes, or your shell drops the inner ones)
+  Files: scp / sftp are still allowed.
+
+""")
+    custom = custom_message()
+    if custom:
+        sys.stderr.write(custom.rstrip("\n") + "\n\n")
+    sys.exit(1)
+
+
+def custom_message():
+    try:
+        with open(os.path.expanduser(CUSTOM_MESSAGE), encoding="utf-8", errors="replace") as f:
+            return f.read(CUSTOM_MESSAGE_MAX)
+    except OSError:
+        return ""
+
+
+def is_sftp(command):
+    """The sftp subsystem, as sshd passes it: internal-sftp or the sftp-server binary."""
+    if command == "internal-sftp":
+        return True
+    return (os.path.isabs(command) and os.path.basename(command) == "sftp-server"
+            and os.access(command, os.X_OK))
+
+
+def split_words(line):
+    """Split like a POSIX shell would, without running anything. Refuses what a shell
+    would turn into a second command, a pipe, a redirection or a substitution."""
+    words, cur, started, i, n = [], [], False, 0, len(line)
+    while i < n:
+        c = line[i]
+        if c in " \t":
+            if started:
+                words.append("".join(cur))
+                cur, started = [], False
+        elif c == "#" and not started:
+            break  # comment
+        elif c == "'":
+            end = line.find("'", i + 1)
+            if end < 0:
+                raise Refused("unclosed single quote")
+            cur.append(line[i + 1:end])
+            started, i = True, end
+        elif c == '"':
+            started, i = True, i + 1
+            while True:
+                if i >= n:
+                    raise Refused("unclosed double quote")
+                c = line[i]
+                if c == '"':
+                    break
+                if c == "\\" and i + 1 < n and line[i + 1] in '"\\$`':
+                    cur.append(line[i + 1])
+                    i += 2
+                    continue
+                if c == "`" or (c == "$" and line[i + 1:i + 2] in ("(", "{")):
+                    raise Refused("command substitution is not allowed")
+                cur.append(c)
+                i += 1
+        elif c == "\\":
+            if i + 1 < n:
+                cur.append(line[i + 1])
+                started, i = True, i + 1
+        elif c in ";&|<>()`$\n":
+            raise Refused(f"a single tmux call only, without '{c.strip() or 'newline'}' "
+                          "(no chaining, pipe, redirection or variable)")
+        else:
+            if c == "~" and not started and (i + 1 == n or line[i + 1] in "/ \t"):
+                c = os.path.expanduser("~")
+            cur.append(c)
+            started = True
+        i += 1
+    if started:
+        words.append("".join(cur))
+    return words
+
+
+def tmux_command_table():
+    out = subprocess.run([TMUX, "list-commands", "-F",
+                          "#{command_list_name} #{command_list_alias}"],
+                         capture_output=True, text=True, check=True).stdout
+    return [(line.split() + [""])[:2] for line in out.splitlines() if line.strip()]
+
+
+def resolve(name, table):
+    """Same lookup as tmux: exact alias, exact name, else unique prefix of a name."""
+    for full, alias in table:
+        if name == alias or name == full:
+            return full
+    matches = [full for full, _ in table if full.startswith(name)]
+    if len(matches) != 1:
+        raise Refused(f"unknown or ambiguous tmux command '{name}'")
+    return matches[0]
+
+
+def getopt(args, arg_flags):
+    """tmux-style option parsing: returns ({flag: value}, positional arguments)."""
+    flags, i = {}, 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            return flags, args[i + 1:]
+        if not a.startswith("-") or a == "-":
+            break
+        for j, ch in enumerate(a[1:], start=1):
+            if ch in arg_flags:
+                value = a[j + 1:]
+                if not value:
+                    i += 1
+                    value = args[i] if i < len(args) else ""
+                flags[ch] = value
+                break
+            flags[ch] = True
+        i += 1
+    return flags, args[i:]
+
+
+def split_tmux_commands(args):
+    """Split on tmux's ';' separators (an argument ending with an unescaped ';')."""
+    commands, cur = [], []
+    for a in args:
+        if a.endswith(";") and not a.endswith("\\;"):
+            if a[:-1]:
+                cur.append(a[:-1])
+            commands.append(cur)
+            cur = []
+        else:
+            cur.append(a[:-2] + ";" if a.endswith("\\;") else a)
+    commands.append(cur)
+    return [c for c in commands if c]
+
+
+def check_tmux(args):
+    i = 0
+    while i < len(args) and args[i].startswith("-") and args[i] != "-":
+        if args[i] == "--":
+            i += 1
+            break
+        bad = set(args[i][1:]) - GLOBAL_FLAGS
+        if bad:
+            raise Refused(f"tmux option -{''.join(sorted(bad))} is not allowed "
+                          "(default tmux server only)")
+        i += 1
+    if any("#(" in a for a in args):
+        raise Refused("#(...) formats are not allowed (they run a command)")
+
+    table = tmux_command_table()
+    commands = split_tmux_commands(args[i:]) or [["new-session"]]
+    needs_tty = False
+    for words in commands:
+        name = resolve(words[0], table)
+        if name not in ALLOWED:
+            raise Refused(f"tmux command '{name}' is not allowed (it acts outside a visible pane)")
+        flags, positional = getopt(words[1:], ARG_FLAGS.get(name, ""))
+        if name in NO_COMMAND:
+            if "e" in flags:
+                raise Refused(f"{name} -e is not allowed")
+            if positional:
+                raise Refused(f"{name} must not start a command: open a shell, "
+                              "then type it with send-keys")
+        if name == "send-keys" and {"K", "X", "R"} & set(flags):
+            raise Refused("send-keys -K / -X / -R are not allowed")
+        if name == "attach-session" or (name == "new-session" and "d" not in flags):
+            needs_tty = True
+    if needs_tty and not os.isatty(0):
+        raise Refused("no terminal: add -t to ssh (ssh -t ...) to open tmux")
+
+
+def main():
+    syslog.openlog("add-ai-user-gate", 0, syslog.LOG_AUTHPRIV)
+    command = os.environ.get("SSH_ORIGINAL_COMMAND", "").strip()
+    try:
+        if not command:
+            raise Refused("direct connection without tmux")
+        if is_sftp(command):
+            if command == "internal-sftp":  # sshd's built-in server can't be run from here
+                command = next((p for p in ("/usr/lib/openssh/sftp-server",
+                                            "/usr/libexec/openssh/sftp-server")
+                                if os.access(p, os.X_OK)), None)
+                if not command:
+                    raise Refused("sftp-server not found")
+            os.execv(command, [command, "-l", "INFO", "-f", "AUTHPRIV"])
+        words = split_words(command)
+        if not words or os.path.basename(words[0]) != "tmux":
+            raise Refused(f"command '{words[0] if words else command}' outside tmux")
+        check_tmux(words[1:])
+    except Refused as e:
+        refuse(str(e))
+    client = (os.environ.get("SSH_CLIENT") or "?").split()[0]
+    syslog.syslog(syslog.LOG_INFO, f"allowed from {client}: {command!r}")
+    env = dict(os.environ)
+    if "utf" not in (env.get("LC_ALL") or env.get("LC_CTYPE") or env.get("LANG") or "").lower():
+        env["LANG"] = "C.UTF-8"
+    os.execve(TMUX, [TMUX, "-u"] + words[1:], env)
+
+
+if __name__ == "__main__":
+    main()
