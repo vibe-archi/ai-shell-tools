@@ -7,13 +7,13 @@ Google Chrome.
 ```bash
 git clone https://github.com/vibe-archi/ai-shell-tools.git
 cd ai-shell-tools/setup-ubuntu-rdp
-sudo ./setup-ubuntu-rdp.sh            # asks: SSH tunnel or public RDP, then a password
+sudo ./setup-ubuntu-rdp.sh   # asks: account name, SSH tunnel or public RDP, password
 ```
 
 ## What you get
 
-- **An XFCE desktop** for a dedicated account (`desktop` by default, `--user` to change
-  it), which is not a sudoer. Only the members of the `rdp-users` group can open a
+- **An XFCE desktop** for a dedicated account (its name is asked the first time,
+  `desktop` by default, or `--user`) and its password, which is not a sudoer. Only the members of the `rdp-users` group can open a
   desktop session, never root.
 - **A recent, patched xrdp** (>= 0.10.6.1) and xorgxrdp (>= 0.10.5): these versions fix
   about twenty CVEs published in 2026. When the Ubuntu repositories are older (Ubuntu

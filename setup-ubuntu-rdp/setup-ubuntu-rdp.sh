@@ -59,7 +59,8 @@ usage() {
     cat <<'HELP'
 Usage: sudo bash setup-ubuntu-rdp.sh [options]
 
-  --user NAME              Linux account of the desktop (default: desktop).
+  --user NAME              Linux account of the desktop, created if needed (default:
+                           asked the first time, desktop when there is no terminal).
   --reset-password         Also set the password of an existing account again.
   --local                  RDP only listens on 127.0.0.1: reach it through an SSH
                            tunnel (recommended).
@@ -127,6 +128,7 @@ warn() { WARNINGS+=("$*"); printf '\nWARNING: %s\n' "$*" >&2; }
 die()  { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
 
 has_tty() { ( : </dev/tty ) 2>/dev/null; }
+valid_user() { [[ $1 =~ ^[a-z_][a-z0-9_-]{0,30}$ && $1 != root ]]; }
 valid_address() {  # IPv4 or IPv6 address, optionally a network (/prefix): prints "ok"
     if [[ $1 =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$ ||
           $1 =~ ^[0-9A-Fa-f]*:[0-9A-Fa-f:.]*(/[0-9]{1,3})?$ ]]; then
@@ -485,6 +487,18 @@ restore_package_defaults_if_needed() {
 
 # -- access, firewall, locale --------------------------------------------------
 
+choose_user() {  # account of the desktop: --user, the previous run's, else asked
+    [[ -z $RDP_USER ]] || return 0
+    RDP_USER=desktop
+    has_tty || return 0
+    local reply
+    while :; do
+        reply=$(ask 'Linux account of the desktop, created if needed [desktop]: ')
+        if valid_user "${reply:-desktop}"; then RDP_USER=${reply:-desktop}; return 0; fi
+        printf 'Invalid name: lowercase letters, digits, _ and -, not root.\n' >/dev/tty
+    done
+}
+
 choose_access() {
     [[ -z $ACCESS ]] || return 0
     if ! has_tty; then
@@ -742,10 +756,9 @@ main() {
     if [[ -n $ALLOW_FROM && -z $ACCESS ]]; then ACCESS=public; fi
     load_settings
     [[ $ALLOW_FROM != any ]] || ALLOW_FROM=''  # kept in local mode, for a later --public
-    RDP_USER=${RDP_USER:-desktop}
     PORT=${PORT:-3389}
     FAIL2BAN=${FAIL2BAN:-1}
-    [[ $RDP_USER =~ ^[a-z_][a-z0-9_-]{0,30}$ && $RDP_USER != root ]] || die 'Invalid user name.'
+    [[ -z $RDP_USER ]] || valid_user "$RDP_USER" || die 'Invalid user name.'
     [[ $APPARMOR_MODE =~ ^(auto|on|off)$ ]] || die 'Invalid --chrome-apparmor mode.'
     [[ $SOURCE =~ ^(auto|repo|backport|ppa)$ ]] || die 'Invalid --source mode.'
     [[ $PORT =~ ^[0-9]+$ ]] && (( PORT >= 1 && PORT <= 65535 )) || die 'Invalid port.'
@@ -776,6 +789,7 @@ main() {
     local audit
     audit=$(dpkg --audit 2>&1 || true)
     [[ -z $audit ]] || die "dpkg is in an incomplete state, fix it first: $audit"
+    choose_user
     if getent passwd "$RDP_USER" >/dev/null; then
         grep -q "^${RDP_USER}:" /etc/passwd || die 'Use a LOCAL Linux account.'
         (( $(id -u "$RDP_USER") >= 1000 )) || die 'The chosen account is a system account.'
@@ -925,8 +939,10 @@ SESSION
     fi
     [[ -e /etc/xrdp/cert.pem ]] || ln -sfn /etc/ssl/certs/ssl-cert-snakeoil.pem /etc/xrdp/cert.pem
     [[ -e /etc/xrdp/key.pem ]] || ln -sfn /etc/ssl/private/ssl-cert-snakeoil.key /etc/xrdp/key.pem
-    runuser -u xrdp -- test -r /etc/xrdp/cert.pem || die 'xrdp cannot read its certificate.'
-    runuser -u xrdp -- test -r /etc/xrdp/key.pem || die 'xrdp cannot read its TLS key; check permissions.'
+    # A real read: "test -r" of uutils coreutils 0.10 (Ubuntu 26.04) ignores supplementary
+    # groups, and ssl-cert is one for xrdp.
+    runuser -u xrdp -- cat -- /etc/xrdp/cert.pem >/dev/null || die 'xrdp cannot read its certificate.'
+    runuser -u xrdp -- cat -- /etc/xrdp/key.pem >/dev/null || die 'xrdp cannot read its TLS key; check permissions.'
     local listen
     if [[ $ACCESS == local ]]; then listen="tcp://127.0.0.1:$PORT"; else listen=$PORT; fi
     python3 "$WORK/configure.py" xrdp /etc/xrdp "$RDP_GROUP" "$listen"
