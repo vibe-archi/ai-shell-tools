@@ -25,8 +25,9 @@ agent, where everything has to happen in tmux:
 - **Read it back later.** Every tmux pane is recorded in `~/tmux-logs`: compressed, kept
   30 days, capped at 2 GB per account. `tmux-logs` lists, reads, replays and searches
   the recordings.
-- **Your rules.** The text of `~/.ai/con-refused.txt` is added to the refusal message: a
-  good place to tell agents how they must work on this account.
+- **Your rules.** The text of `~/.ai/con-refused.txt` is added to the refusal message, to
+  tell agents how they must work on this account. The default rules ask them to name
+  their session after their task and to share the command to watch it.
 - **A comfortable tmux for humans too.** Oh my tmux! with byobu-style F-keys, mouse
   support, an F1 cheat sheet and an F9 menu.
 
@@ -46,11 +47,14 @@ sudo ./add-ai-user.sh --host server.example.com bob   # asks for bob's SSH publi
 Then:
 
 ```bash
-ssh -t bob@server.example.com tmux new -A -s main                      # you, to watch
-ssh bob@server.example.com tmux new -d -s work                          # the agent...
-ssh bob@server.example.com "tmux send-keys -t work 'make test' Enter"   # ...types
-ssh bob@server.example.com tmux capture-pane -p -t work                 # ...and reads
+ssh bob@server.example.com tmux new -d -s fix-login                          # the agent...
+ssh bob@server.example.com "tmux send-keys -t fix-login 'make test' Enter"   # ...types
+ssh bob@server.example.com tmux capture-pane -p -t fix-login                 # ...and reads
+ssh -t bob@server.example.com tmux attach -r -t fix-login                    # you watch
 ```
+
+By default, the rules shown to a refused agent ask it to give its tmux session a short,
+descriptive name and to tell you the command to watch it, like the last line above.
 
 More: [add-ai-user/README.md](add-ai-user/README.md) (options, key bindings, logs,
 configuration) and [add-ai-user/docs/how-it-works.md](add-ai-user/docs/how-it-works.md)

@@ -19,8 +19,10 @@ tmux server and watch, and every pane is recorded in `~/tmux-logs` anyway.
   other commands, private tmux servers (`-L`, `-S`) and every tmux command that runs
   something outside a visible pane (`run-shell`, `if-shell`, a command given to
   `new-window`, `#(...)` formats, ...) are refused with an explanation.
-- **A custom refusal message** per account: the content of `~/.ai/con-refused.txt` is shown
-  below the standard one, a good place for the rules an agent must follow.
+- **Rules for agents** per account: the content of `~/.ai/con-refused.txt` is shown below
+  the standard refusal message. The default rules ask agents to give their session a
+  short, descriptive name and to tell their user the command to watch it
+  ([Rules for agents](#rules-for-agents)).
 - **Recording of every tmux pane** in `~/tmux-logs/<session>/`, in 50 MB files, compressed
   once closed, deleted after 30 days, capped at 2 GB per account. Recording pauses when
   the disk has less than 2 GB free.
@@ -44,7 +46,8 @@ sudo ./add-ai-user.sh --host server.example.com --key ~/agent_key.pub --message 
 ```
 
 This installs the system part (once), creates `bob`, authorizes the key, copies
-`rules.txt` to `~bob/.ai/con-refused.txt` and starts bob's log janitor.
+`rules.txt` to `~bob/.ai/con-refused.txt` and starts bob's log janitor. Without
+`--message`, bob gets the default rules.
 
 Without `--key`, when the user has no key yet, the script asks for one before changing
 anything: paste the public key, check its fingerprint, then confirm it or enter it again.
@@ -66,7 +69,8 @@ Usage: sudo ./add-ai-user.sh [options] <user>
 
   -k, --key <file|key>  authorize SSH public key(s), repeatable
       --no-key          don't ask for a key (password login, or keys added later)
-  -m, --message <file>  text shown below the "connection refused" message
+  -m, --message <file>  rules shown below the "connection refused" message (default:
+                        /etc/add-ai-user/con-refused.txt; "default" applies it again)
   -p, --password        set the user's password (asked interactively)
   -s, --sudo            add the user to the sudo group (asks for a password if it has none)
   -u, --update          <user> already exists: (re)apply the add-ai-user setup to it
@@ -91,20 +95,20 @@ ssh -t bob@server.example.com tmux new -A -s main
 An agent drives a session with tmux commands only:
 
 ```bash
-ssh bob@server.example.com tmux new -d -s work                         # once
-ssh bob@server.example.com "tmux send-keys -t work 'make test' Enter"   # type a command
-ssh bob@server.example.com tmux capture-pane -p -t work -S -100         # read the screen
+ssh bob@server.example.com tmux new -d -s fix-login                          # once
+ssh bob@server.example.com "tmux send-keys -t fix-login 'make test' Enter"   # type a command
+ssh bob@server.example.com tmux capture-pane -p -t fix-login -S -100         # read the screen
 ```
 
 The command line is read twice, by your shell and on the server: keep the double quotes
-around the whole tmux command. With `ssh ... tmux send-keys -t work 'make test' Enter`,
+around the whole tmux command. With `ssh ... tmux send-keys -t fix-login 'make test' Enter`,
 your shell removes the single quotes, and tmux receives `make` and `test` as two separate
 keys and types `maketest`.
 
 To know when a command is over, make it signal a tmux channel and wait for it:
 
 ```bash
-ssh bob@server.example.com "tmux send-keys -t work 'make test; tmux wait-for -S done' Enter"
+ssh bob@server.example.com "tmux send-keys -t fix-login 'make test; tmux wait-for -S done' Enter"
 ssh bob@server.example.com tmux wait-for done      # returns when make test has finished
 ```
 
@@ -126,13 +130,40 @@ $ ssh bob@server.example.com
          double quotes, or your shell drops the inner ones)
   Files: scp / sftp are still allowed.
 
-<content of ~bob/.ai/con-refused.txt>
+  Rules for AI agents on this account:
+
+  1. Name your tmux session after your task: short and descriptive, lowercase
+     words separated by dashes (fix-login-bug, deploy-api, review-pr-42), never
+     a generic name such as "work", "main" or "s1".
+
+  2. As soon as the session exists, give your user its name and the command to
+     watch it from outside, in case they want to:
+
+       ssh -t bob@server.example.com tmux attach -r -t <session>
+
+     (-r is read-only: they see everything without typing into your session.
+     F6 or Ctrl+b d detaches.)
 ```
+
+## Rules for agents
+
+The text of `~<user>/.ai/con-refused.txt` is shown below the standard refusal message:
+it is where you tell the agents of an account how to work. The gate reads it at each
+refused connection, so a change applies at once.
+
+- New accounts get the default rules, `/etc/add-ai-user/con-refused.txt` (shown above):
+  edit that file to change them for the next accounts. `{user}` and `{host}` are replaced
+  by the account and host names when the rules are copied.
+- `--message <file>` gives an account its own rules; `--update --message default <user>`
+  puts the default ones back. `--update` without `--message` keeps the account's rules.
+- Or edit `~<user>/.ai/con-refused.txt` directly. It belongs to the account, so its
+  agents could change it too (you would see it in the recordings).
 
 ## Watching and reading back
 
-- `tmux ls`, then `tmux attach -t <session>`, or **F9 > Choose session / window**:
-  you share the agent's screen, live.
+- `ssh -t <user>@<host> tmux attach -r -t <session>` shows an agent's session read-only;
+  drop `-r` to be able to type too. On the server: `tmux ls`, then `tmux attach -t
+  <session>`, or **F9 > Choose session / window**.
 - `tmux-logs` lists the latest recordings, `tmux-logs view <name>` reads one,
   `tmux-logs replay <name>` prints it raw so that full-screen apps (Claude Code, htop...)
   are redrawn, `tmux-logs grep <pattern>` searches them all, `tmux-logs du` shows the
@@ -172,7 +203,7 @@ LOG_KEEP_DAYS=30              # logs older than this are deleted
 LOG_MAX_TOTAL_MB=2048         # per account cap, the oldest compressed logs go first
 ```
 
-Per account: `~/.ai/con-refused.txt` (refusal message) and
+Per account: `~/.ai/con-refused.txt` (rules for agents, see above) and
 `~/.config/tmux/tmux.conf.local` (tmux settings, Oh my tmux! style).
 
 ## What gets installed
@@ -185,6 +216,7 @@ Per account: `~/.ai/con-refused.txt` (refusal message) and
 | `/usr/local/lib/add-ai-user/tmux-logs-janitor` | compresses, expires and caps the logs |
 | `/usr/local/bin/tmux-logs` | log reader |
 | `/etc/add-ai-user/add-ai-user.conf` | settings |
+| `/etc/add-ai-user/con-refused.txt` | default rules for agents, copied to new accounts |
 | `/etc/ssh/sshd_config.d/60-add-ai-user.conf` | `Match Group add-ai-user` + `ForceCommand` |
 | `/etc/systemd/system/add-ai-user-janitor@.{service,timer}` | one janitor timer per account |
 | `~/.config/tmux/tmux.conf` | link to Oh my tmux! |

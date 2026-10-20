@@ -67,7 +67,11 @@ so the panes themselves would be refused; `su`, `sudo -iu`, cron... would break 
 
 Refusals and allowed commands are logged to syslog (`journalctl -t add-ai-user-gate`). A refusal
 prints the standard message, followed by the content of `~/.ai/con-refused.txt` when the
-file exists (up to 64 KB).
+file exists (up to 64 KB). New accounts get a copy of `/etc/add-ai-user/con-refused.txt`
+with `{user}` and `{host}` filled in. Its default rules ask agents to name their tmux
+session after their task, and to give their user the command to watch it read-only
+(`ssh -t user@host tmux attach -r -t <session>`): a refused connection is usually an
+agent's first contact with the account, so that is where it learns how to behave.
 
 `tests/test-gate.sh` runs the gate on 47 commands (37 refused, 10 allowed), plus the
 custom message when there is one.
@@ -143,10 +147,10 @@ Only tmux commands go through, so an agent (or a human script) works like this:
 
 ```bash
 H=bob@server.example.com
-ssh $H tmux new -d -s work
-ssh $H "tmux send-keys -t work -l -- 'make test; tmux wait-for -S done-1' \; send-keys -t work Enter"
-ssh $H tmux wait-for done-1                    # blocks until the command has finished
-ssh $H tmux capture-pane -p -J -t work -S -200   # its output
+ssh $H tmux new -d -s fix-login
+ssh $H "tmux send-keys -t fix-login -l -- 'make test; tmux wait-for -S done-1' \; send-keys -t fix-login Enter"
+ssh $H tmux wait-for done-1                         # blocks until the command has finished
+ssh $H tmux capture-pane -p -J -t fix-login -S -200   # its output
 ```
 
 Files are copied with scp, then used from a pane. Everything the agent types is visible
