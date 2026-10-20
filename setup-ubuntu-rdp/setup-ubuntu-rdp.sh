@@ -127,6 +127,12 @@ warn() { WARNINGS+=("$*"); printf '\nWARNING: %s\n' "$*" >&2; }
 die()  { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
 
 has_tty() { ( : </dev/tty ) 2>/dev/null; }
+valid_address() {  # IPv4 or IPv6 address, optionally a network (/prefix): prints "ok"
+    if [[ $1 =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$ ||
+          $1 =~ ^[0-9A-Fa-f]*:[0-9A-Fa-f:.]*(/[0-9]{1,3})?$ ]]; then
+        echo ok
+    fi
+}
 ask() {  # ask PROMPT: read an answer on the terminal (not logged)
     local reply=''
     printf '%s' "$1" >/dev/tty
@@ -506,7 +512,7 @@ EOF
     if [[ $ACCESS == public && -z $ALLOW_FROM ]] && ufw_enabled; then
         while :; do
             ALLOW_FROM=$(ask 'Only accept RDP from this IP address or network (empty = from anywhere): ')
-            [[ -z $ALLOW_FROM || $ALLOW_FROM =~ ^[0-9A-Fa-f:.]+(/[0-9]{1,3})?$ ]] && break
+            [[ -z $ALLOW_FROM || $(valid_address "$ALLOW_FROM") == ok ]] && break
             printf 'Not an address: use something like 203.0.113.7 or 203.0.113.0/24.\n' >/dev/tty
         done
     fi
@@ -743,7 +749,7 @@ main() {
     [[ $APPARMOR_MODE =~ ^(auto|on|off)$ ]] || die 'Invalid --chrome-apparmor mode.'
     [[ $SOURCE =~ ^(auto|repo|backport|ppa)$ ]] || die 'Invalid --source mode.'
     [[ $PORT =~ ^[0-9]+$ ]] && (( PORT >= 1 && PORT <= 65535 )) || die 'Invalid port.'
-    [[ -z $ALLOW_FROM || $ALLOW_FROM =~ ^[0-9A-Fa-f:.]+(/[0-9]{1,3})?$ ]] || die 'Invalid --allow-from address.'
+    [[ -z $ALLOW_FROM || $ALLOW_FROM == any || $(valid_address "$ALLOW_FROM") == ok ]] || die 'Invalid --allow-from address.'
     [[ -z $SESSION_LOCALE || $SESSION_LOCALE =~ ^[A-Za-z_@]+\.[Uu][Tt][Ff]-?8$ ]] || die 'Invalid --locale (expected a UTF-8 locale such as fr_FR.UTF-8).'
     (( EUID == 0 )) || die "Run it as root: sudo bash $0"
     [[ -r /etc/os-release ]] || die 'Cannot detect the distribution.'
