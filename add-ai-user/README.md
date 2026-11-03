@@ -19,10 +19,13 @@ tmux server and watch, and every pane is recorded in `~/tmux-logs` anyway.
   other commands, private tmux servers (`-L`, `-S`) and every tmux command that runs
   something outside a visible pane (`run-shell`, `if-shell`, a command given to
   `new-window`, `#(...)` formats, ...) are refused with an explanation.
-- **Rules for agents** per account: the content of `~/.ai/con-refused.txt` is shown below
-  the standard refusal message. The default rules ask agents to give their session a
-  short, descriptive name and to tell their user the command to watch it
-  ([Rules for agents](#rules-for-agents)).
+- **Instructions for agents** per account, in `~/AGENTS.md`: how to connect, a short and
+  descriptive session name, and the command to give their user to watch it. A refused
+  connection points to it, and you can add your own instructions
+  ([Instructions for agents](#instructions-for-agents)).
+- **An optional restricted account type**, for an agent that watches a system without being
+  able to change it: read-only diagnostics you choose category by category
+  ([Restricted accounts](#restricted-accounts)).
 - **Recording of every tmux pane** in `~/tmux-logs/<session>/`, in 50 MB files, compressed
   once closed, deleted after 30 days, capped at 2 GB per account. Recording pauses when
   the disk has less than 2 GB free.
@@ -45,9 +48,9 @@ git clone https://github.com/vibe-archi/ai-shell-tools.git && cd ai-shell-tools/
 sudo ./add-ai-user.sh --host server.example.com --key ~/agent_key.pub --message rules.txt bob
 ```
 
-This installs the system part (once), creates `bob`, authorizes the key, copies
-`rules.txt` to `~bob/.ai/con-refused.txt` and starts bob's log janitor. Without
-`--message`, bob gets the default rules.
+This installs the system part (once), creates `bob`, authorizes the key, writes
+`~bob/AGENTS.md` with `rules.txt` below the default instructions and starts bob's log
+janitor. With a terminal, a new account is first asked for its type, standard or restricted.
 
 Without `--key`, when the user has no key yet, the script asks for one before changing
 anything: paste the public key, check its fingerprint, then confirm it or enter it again.
@@ -69,15 +72,20 @@ Usage: sudo ./add-ai-user.sh [options] <user>
 
   -k, --key <file|key>  authorize SSH public key(s), repeatable
       --no-key          don't ask for a key (password login, or keys added later)
-  -m, --message <file>  rules shown below the "connection refused" message (default:
-                        /etc/add-ai-user/con-refused.txt; "default" applies it again)
+  -m, --message <file>  your own instructions in ~<user>/AGENTS.md, below the managed block
+                        ("default" removes them)
   -p, --password        set the user's password (asked interactively)
   -s, --sudo            add the user to the sudo group (asks for a password if it has none)
   -u, --update          <user> already exists: (re)apply the add-ai-user setup to it
-      --host <name>     host name shown in the refusal message
+      --host <name>     host name shown to agents
       --system-only     install or update the system part only
       --remove <user>   take <user> out of add-ai-user (the account and its files are kept)
       --uninstall       remove add-ai-user from the system (users and their files are kept)
+      --standard        standard account; turns a restricted account back into a standard one
+      --restricted      read-only account, see below
+      --allow <list>    categories without asking: defaults, all, none or a comma-separated list
+      --agent-location  remote (over SSH, no new outbound connection) or local (a CLI on the server)
+  -y, --yes             confirm making an existing account restricted
 ```
 
 Running `add-ai-user.sh` again is safe: it updates the system part (and Oh my tmux!) in place.
@@ -120,44 +128,124 @@ $ ssh bob@server.example.com
   Connection refused: direct connection without tmux.
 
   On this account everything goes through tmux (default server), so that the
-  work stays visible and is logged in ~/tmux-logs.
+  work stays visible and is logged in ~/tmux-logs. Scp and sftp are allowed.
 
+  AI: read the instructions of this account before anything else:
+      ssh bob@server.example.com cat AGENTS.md
   Human: ssh -t bob@server.example.com tmux new -A -s <name>
-  AI:    ssh bob@server.example.com tmux new -d -s <name>
-         ssh bob@server.example.com "tmux send-keys -t <name> '<command>' Enter"
-         ssh bob@server.example.com tmux capture-pane -p -t <name>
-         (to run a command, type it into a tmux shell with send-keys; keep the
-         double quotes, or your shell drops the inner ones)
-  Files: scp / sftp are still allowed.
-
-  Rules for AI agents on this account:
-
-  1. Name your tmux session after your task: short and descriptive, lowercase
-     words separated by dashes (fix-login-bug, deploy-api, review-pr-42), never
-     a generic name such as "work", "main" or "s1".
-
-  2. As soon as the session exists, give your user its name and the command to
-     watch it from outside, in case they want to:
-
-       ssh -t bob@server.example.com tmux attach -r -t <session>
-
-     (-r is read-only: they see everything without typing into your session.
-     F6 or Ctrl+b d detaches.)
 ```
 
-## Rules for agents
+## Instructions for agents
 
-The text of `~<user>/.ai/con-refused.txt` is shown below the standard refusal message:
-it is where you tell the agents of an account how to work. The gate reads it at each
-refused connection, so a change applies at once.
+`~/AGENTS.md` holds everything an agent has to know on the account: how to connect, how to
+name its tmux session, and that it must give its user the command to watch that session.
+Agents are told to read it in several ways:
 
-- New accounts get the default rules, `/etc/add-ai-user/con-refused.txt` (shown above):
-  edit that file to change them for the next accounts. `{user}` and `{host}` are replaced
-  by the account and host names when the rules are copied.
-- `--message <file>` gives an account its own rules; `--update --message default <user>`
-  puts the default ones back. `--update` without `--message` keeps the account's rules.
-- Or edit `~<user>/.ai/con-refused.txt` directly. It belongs to the account, so its
-  agents could change it too (you would see it in the recordings).
+- `ssh <user>@<host> cat AGENTS.md` is answered by the gate, without a tmux session, and every
+  refused connection points to this command;
+- `tmux new` over SSH says it on stderr, and a new tmux shell prints where the file is;
+- a Claude Code or Codex CLI started on the account reads it by itself, through
+  `~/.claude/CLAUDE.md` (`@~/AGENTS.md`) and the `~/.codex/AGENTS.md` link.
+
+The file has two parts:
+
+- A managed block between `<!-- add-ai-user:begin ... -->` and `<!-- add-ai-user:end -->`, rewritten
+  by `--update` from `/etc/add-ai-user/AGENTS.md`. Edit that template to change the default text;
+  `{user}` and `{host}` are replaced.
+- Your own instructions, anywhere outside the block: `--update` keeps them. Edit the file, or use
+  `--message <file>` to replace them and `--message default` to remove them.
+
+The file belongs to a standard account, so its agents could change it too (you would see it in
+the recordings). On a restricted account the real file is `/etc/add-ai-user/agents/<user>.md`,
+owned by root; `~/AGENTS.md` links to it and the gate reads it directly.
+
+An account set up by an older version keeps its text: the first `--update` moves a customized
+`~/.ai/con-refused.txt` into `AGENTS.md` and renames the old file `con-refused.txt.migrated`.
+
+## Restricted accounts
+
+For an agent that runs continuously to watch logs, security, performance and so on, without being
+able to install, change or reconfigure anything. The agent still works over SSH or from a Claude
+or Codex CLI on the server: it is an account with fewer rights, not a service.
+
+```bash
+sudo ./add-ai-user.sh --restricted --key ~/agent_key.pub watcher
+sudo ./add-ai-user.sh --restricted --allow defaults --agent-location remote --key ~/agent_key.pub watcher
+```
+
+Without `--allow`, the script asks about each category, says what it covers and lists its tools.
+Then it asks where the agent runs. An existing account can be converted with `--update
+--restricted`: the script lists what will change (privileged groups, closed sessions, sudo rules and
+files outside the home it can't deal with) and asks for confirmation.
+
+The agent reads through `ai-diag`, typed in its tmux pane or run by its CLI:
+
+```
+$ ai-diag list network
+$ ai-diag network firewall
+# status=ok scope=host-global generated_at=2026-11-03T00:00:01Z
+{"nftables": [...
+$ ai-diag logs unit unit=ssh.service since=1h
+```
+
+| Category | Default | What it reads |
+| --- | --- | --- |
+| `base` | always | processes without arguments, services, packages, disk usage, addresses, time |
+| `logs` | yes | recent log entries with user names and secret-looking values removed; this text goes to the model provider in a hosted session |
+| `performance` | yes | `vmstat`, `iostat`, `sar`, `top -b`, PSI; turns on the sysstat history |
+| `network` | yes | sockets, firewall rules, counters, DNS, certificates, probes to approved targets |
+| `storage` | yes | SMART and NVMe health, RAID, LVM, ZFS, btrfs, directory sizes |
+| `kernel` | yes | kernel messages, modules, parameters, taint, deleted files held open |
+| `accounts` | yes | users, groups, logins, failed logins per address, sudo and SSH policy as derived facts |
+| `persistence` | yes | timers, unit overrides, cron and startup files as metadata and hashes |
+| `security` | yes | AppArmor, audit, fail2ban, CrowdSec, process hardening, setuid and world-writable files |
+| `hardware` | if bare metal | CPU, PCI, USB, sensors, memory errors, BMC, without serial numbers |
+| `containers` | if detected | containers and VMs with state and resource use; no exec, environment or raw inspect |
+| `services` | if detected | nginx and Apache counters, PostgreSQL readiness, mail queue counts |
+| `security_scans` | no | latest result of lynis, debsums, rkhunter, chkrootkit, debsecan, run weekly by a timer |
+| `profiling` | no | aggregate CPU counters and latency histograms |
+| `packet_capture` | no | addresses, ports and lengths for at most 30 s, never payloads |
+
+**What the account can't do.** It has no sudo and leaves the privileged groups (`sudo`, `docker`,
+`lxd`, `disk`, `adm`, `systemd-journal`...). Its login shell sets `no_new_privs`, so setuid programs
+and file capabilities give nothing. polkit refuses it everything, cron and `at` refuse it, SSH
+forwards nothing for it, and its processes have memory, task and CPU limits
+(`RESTRICTED_*` in the configuration).
+
+**Where the privileged readings come from.** Each diagnostic is a fixed command run by a sandboxed
+collector on a Unix socket reserved to the group of its category. A parameter only chooses among
+values the collector lists itself (units, interfaces, approved targets...), so a request can't
+supply a path or an option. Output is capped at 256 KiB and stripped of terminal escapes, requests
+are rate limited per user and written to the journal (`journalctl -g '^ai-diag '`).
+
+**Outbound connections.** `--agent-location remote` (the agent connects from outside) blocks new
+outbound connections of the account with nftables, DNS and loopback included; active network tests
+go through `ai-diag`, to the loopback, the gateway, the resolvers and the targets you list in
+`/etc/add-ai-user/restricted/targets`. `local` (a CLI on the server) leaves them open because the
+CLI needs its API, and the script warns about it: the agent can send what it reads anywhere it can
+reach. A domain allow list through a proxy is not implemented yet.
+
+**Packages.** Read-only tools of the chosen categories are installed, without starting their
+services. Tools tied to a technology (fail2ban, mdadm, Docker...) are never installed: they are used
+if present, otherwise the diagnostic answers `unavailable`.
+
+**Changing and removing.** `--update --allow <list> <user>` changes the categories and closes the
+sessions of the account, because a running process keeps its old groups. `--update --standard <user>`
+turns it back into a standard account; the privileged groups it had before are not given back.
+
+**Limits you should know about:**
+
+- Disk space: without quotas the home can still fill the disk. A single file stops at 1 GiB, not the
+  total. `/tmp` is shared with the system.
+- Anything the account can already read with ordinary Unix permissions stays readable, as does
+  everything `ai-diag` returns: choose categories knowing the text goes to the model.
+- Log and process names are attacker-influenced. They are marked `untrusted` and the agent is told
+  not to obey them, which reduces prompt injection but doesn't remove it.
+- Removal of secrets from logs works by pattern, so it can miss some.
+- Files it owned outside its home before the conversion remain its own: the script lists them.
+- In a container, the kernel, SMART, BMC, dmidecode, perf and BPF diagnostics answer `unavailable`.
+- Not covered yet: aide, ClamAV, YARA, OpenSCAP and needrestart in `security_scans`, service
+  diagnostics that need credentials (database roles, Redis...), Docker logs, UPS.
 
 ## Watching and reading back
 
@@ -196,14 +284,17 @@ Byobu's keys, on top of Oh my tmux!. **F1** shows them all, **F9** opens a menu.
 `/etc/add-ai-user/add-ai-user.conf`, shared by every add-ai-user account:
 
 ```bash
-SSH_HOST=server.example.com   # host name shown in the refusal message
+SSH_HOST=server.example.com   # host name shown to agents
 LOG_CHUNK_MB=50               # a pane log starts a new file every LOG_CHUNK_MB
 LOG_MIN_FREE_MB=2048          # recording pauses below this much free disk space
 LOG_KEEP_DAYS=30              # logs older than this are deleted
 LOG_MAX_TOTAL_MB=2048         # per account cap, the oldest compressed logs go first
+RESTRICTED_MEMORY_MAX=50%     # limits of each restricted account, applied by --update
+RESTRICTED_TASKS_MAX=1024
+RESTRICTED_CPU_QUOTA=200%
 ```
 
-Per account: `~/.ai/con-refused.txt` (rules for agents, see above) and
+Per account: `~/AGENTS.md` (instructions for agents, see above) and
 `~/.config/tmux/tmux.conf.local` (tmux settings, Oh my tmux! style).
 
 ## What gets installed
@@ -216,18 +307,41 @@ Per account: `~/.ai/con-refused.txt` (rules for agents, see above) and
 | `/usr/local/lib/add-ai-user/tmux-logs-janitor` | compresses, expires and caps the logs |
 | `/usr/local/bin/tmux-logs` | log reader |
 | `/etc/add-ai-user/add-ai-user.conf` | settings |
-| `/etc/add-ai-user/con-refused.txt` | default rules for agents, copied to new accounts |
+| `/etc/add-ai-user/AGENTS.md`, `AGENTS-restricted.md` | templates of the managed block of `~/AGENTS.md` |
 | `/etc/ssh/sshd_config.d/60-add-ai-user.conf` | `Match Group add-ai-user` + `ForceCommand` |
 | `/etc/systemd/system/add-ai-user-janitor@.{service,timer}` | one janitor timer per account |
+| `~/AGENTS.md` | instructions for agents |
+| `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md` | make the CLIs read `~/AGENTS.md` |
 | `~/.config/tmux/tmux.conf` | link to Oh my tmux! |
 | `~/.config/tmux/tmux.conf.local` | the account's tmux settings |
 | `~/tmux-logs/` | the recordings |
+
+Only with a restricted account:
+
+| Path | What |
+| --- | --- |
+| `/usr/local/lib/add-ai-user/restricted/` | catalog, collector, `ai-diag`, login shell, scan runner |
+| `/usr/local/bin/ai-diag` | what the agent runs |
+| `/etc/systemd/system/ai-diag-<profile>.socket`, `ai-diag-<profile>@.service` | one socket and one sandboxed collector per privilege level |
+| `/etc/systemd/system/add-ai-user-outbound.service` | loads the outbound rules |
+| `/etc/systemd/system/add-ai-user-scans.{service,timer}` | weekly scans, when scanners are enabled |
+| `/etc/systemd/system/user@<uid>.service.d/`, `user-<uid>.slice.d/` | `no_new_privs` and limits of the account |
+| `/etc/add-ai-user/restricted/` | state of each account, approved targets, scanners, outbound rules |
+| `/etc/add-ai-user/agents/<user>.md` | the real `AGENTS.md` of the account |
+| `/etc/polkit-1/rules.d/60-add-ai-user.rules` | polkit refuses the account everything |
+| `/etc/ssh/sshd_config.d/61-add-ai-restricted.conf` | no forwarding |
+| `/etc/cron.deny`, `/etc/at.deny` | one line for the account |
+| `/var/lib/add-ai-user/scans/` | latest output of the scanners |
+| user `ai-diag`, groups `add-ai-restricted` and `ai-diag-<category>` | identity of the collectors, rights of the accounts |
 
 ## Tests
 
 ```bash
 tests/test-gate.sh    # 47+ commands the gate must refuse or allow (run as an add-ai-user account)
 tests/test-logs.sh    # pane-logger chunks and janitor rules, in a temporary directory
+tests/test-restricted.sh   # run as a restricted account, in a pane: what it can't do, every granted
+                           # diagnostic, bad parameters, rate limit. --all adds the slow scans
+sudo tests/probe-restricted.sh   # what a new host or container allows: sandbox, capabilities, nft
 ```
 
 ## How it works

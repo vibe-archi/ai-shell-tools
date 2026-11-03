@@ -65,16 +65,16 @@ so the panes themselves would be refused; `su`, `sudo -iu`, cron... would break 
 9. Allowed: the gate `exec`s `tmux -u <the same arguments>`, with `LANG=C.UTF-8` when the
    client sent no UTF-8 locale (ssh from Windows sends none).
 
-Refusals and allowed commands are logged to syslog (`journalctl -t add-ai-user-gate`). A refusal
-prints the standard message, followed by the content of `~/.ai/con-refused.txt` when the
-file exists (up to 64 KB). New accounts get a copy of `/etc/add-ai-user/con-refused.txt`
-with `{user}` and `{host}` filled in. Its default rules ask agents to name their tmux
-session after their task, and to give their user the command to watch it read-only
-(`ssh -t user@host tmux attach -r -t <session>`): a refused connection is usually an
-agent's first contact with the account, so that is where it learns how to behave.
+Refusals and allowed commands are logged to syslog (`journalctl -t add-ai-user-gate`).
 
-`tests/test-gate.sh` runs the gate on 47 commands (37 refused, 10 allowed), plus the
-custom message when there is one.
+A refused connection is usually an agent's first contact with the account, so the refusal points
+to the instructions: `ssh user@host cat AGENTS.md`. The gate answers `cat <any path>/AGENTS.md`
+itself, with no tmux session: an unquoted `~/AGENTS.md` is expanded by the client's shell, and
+what is printed is always the file of this account (up to 256 KB). On a restricted account it reads
+`/etc/add-ai-user/agents/<user>.md`, which a broken link in the home can't hide.
+
+`tests/test-gate.sh` runs the gate on about 55 commands, and checks that a refusal points to the
+instructions and that they can be read.
 
 ## 2. Recording every pane
 
@@ -156,7 +156,85 @@ ssh $H tmux capture-pane -p -J -t fix-login -S -200   # its output
 Files are copied with scp, then used from a pane. Everything the agent types is visible
 in the pane, recorded in `~/tmux-logs`, and each SSH command is in the gate's syslog.
 
+## 6. Restricted accounts
+
+The gate gives visibility; a restricted account also takes the rights away. The agent is not a
+service but a user who logs in or starts a CLI, so the limits apply to its session.
+
+### Taking the rights away
+
+```
+sshd -> login-shell -> setpriv --no-new-privs -> bash -c ssh-gate -> tmux server -> panes
+```
+
+- sshd runs `ForceCommand` through the login shell, so the wrapper covers the gate, the tmux server
+  and every pane, and also `su` and CLIs started on the server. `no_new_privs` can't be removed and
+  is inherited: `sudo` refuses to start, setuid programs and file capabilities give nothing.
+- A drop-in sets `NoNewPrivileges=yes` on `user@<uid>.service`, whose services are not children of the
+  login shell. Another sets memory, task and CPU limits on `user-<uid>.slice`.
+- polkit answers no to any request from the group `add-ai-restricted`. Without this rule, an
+  unprivileged user can run `loginctl enable-linger` on itself (tested).
+- A process keeps the groups it started with, so a change of categories closes the sessions of the
+  account: a right taken away would otherwise stay in the running tmux server.
+- No private `/tmp`: a `pam_namespace` tmpfs per session would hide the tmux socket from the next
+  SSH call. No disk quota either, since containers rarely offer one. `ulimit -f` only caps single files.
+
+### Reading through collectors
+
+Capabilities don't make a tool read-only: `nft` with `CAP_NET_ADMIN` can also flush the ruleset. What
+keeps a collector read-only is that it runs one fixed argument list:
+
+```
+ai-diag network firewall -> /run/ai-diag/network-admin.sock (root:ai-diag-network 0660)
+  -> ai-diag-network-admin@.service (Accept=yes, one instance per connection)
+  -> diag-helper network-admin -> execve(nft -n -t -j list ruleset)
+```
+
+- `lib/restricted/catalog.py` is the only definition: categories, profiles, diagnostics. The questions
+  of the install, the units, the helper, `ai-diag` and the rights listed in `AGENTS.md` all come from it.
+- One socket and one service per privilege level (`network`, `network-proc`, `network-admin`...): a
+  single helper would hold the union of all capabilities. A diagnostic can only be asked on the socket
+  of its profile. Each socket is reserved to the group of its category.
+- Non-root with the capability it needs wherever the probe showed this is enough; root only for
+  what requires it (`ufw`, `sshd -T`, `smartctl`...), with its capability set reduced.
+- The file system is read-only for the collector (`ProtectSystem=strict`) except its own state and
+  cache directories. The helper checks at each request that writing under `/usr` fails, and refuses
+  to answer otherwise. An install probe decides whether the sandbox is available; only a container may
+  go without it, and the script says so.
+- Parameters are checked against lists built when asked: units from `systemctl`, interfaces from
+  `/sys/class/net`, disks from `/sys/block`, targets from the admin's list and the system's gateway and
+  resolvers, with link-local and multicast addresses refused after resolution. Nothing typed by the agent
+  reaches a command line unless it equals a listed value.
+- The command runs without a shell, with a clean environment (`PAGER=cat`, `SYSTEMD_PAGERSECURE=1`,
+  `LANG=C`...) and in its own process group, killed at the time limit. Output is capped, and ANSI, C0/C1 and
+  bidirectional characters are removed.
+- Filters remove what a raw tool would give away: user names in sshd and PAM log lines, since a password
+  typed as a login ends up there; serial numbers; GECOS fields; WireGuard keys. Failed logins are
+  reduced to counts per address, split between existing and unknown accounts.
+- Every answer is a frame with a status and a scope. A tool or data that isn't there gives
+  `unavailable`, not an empty success, so that an agent doesn't report a gap as a healthy result.
+- Each request goes to the journal: UID, profile, diagnostic, validated parameters, status, size and
+  duration. A refused request only logs the fact, so that it can't be used to inject text in the logs. The
+  account has no journal access, so it can't read or change that trace.
+
+### Outbound connections
+
+`meta skuid` in an nftables `output` chain rejects new connections of the UIDs whose agent is remote, and
+accepts established ones so that sshd can still answer. Collectors run under other UIDs, so their network
+tests pass. `IPAddressDeny=` was not used since it has no effect in a container. This filter was tested
+in the same Proxmox LXC: the account gets `connection refused` to the outside and a collector still connects.
+
+### Scanners
+
+A scanner can take hours, and an agent must not be able to start it in a loop or update its baseline. So a
+weekly timer runs `run-scans` with fixed commands, and the collector only returns the latest output with its
+date. Their packaged timers are disabled at install, and their cron scripts stay off: `debsums` and `rkhunter`
+default to it on Ubuntu 26.04, and the one of `chkrootkit` exits under systemd.
+
 ## Tested on
 
-Ubuntu 26.04 (tmux 3.6, OpenSSH 10.2, Python 3.14), in a Proxmox LXC container, with
-connections from Windows (OpenSSH for Windows).
+Ubuntu 26.04 (tmux 3.6, OpenSSH 10.2, Python 3.14, systemd 259), in a Proxmox LXC container, with
+connections from Windows (OpenSSH for Windows). The diagnostics that only exist on bare metal or in a VM
+(SMART, BMC, perf, BPF...) have not run on real hardware yet: in this container they answer `unavailable`.
+Codex was checked to read `~/AGENTS.md` by itself. Claude Code was not, since it wasn't logged in on the test
+machine: its loading of the file relies on the `@~/AGENTS.md` import documented for `CLAUDE.md`.

@@ -11,11 +11,13 @@ This is a usage rule, not a security boundary.
   refused  shells and any other command, tmux -L/-S/-f/-c/-C..., run-shell & co,
            a command given to new-session/new-window/split-window, #(...) formats
 
-When a connection is refused, the content of ~/.ai/con-refused.txt (if any) is shown
-below the standard message.
+The instructions of the account are in ~/AGENTS.md: a refused connection points to them, and
+"cat AGENTS.md" is answered here, without a tmux session. On a restricted account the file
+is /etc/add-ai-user/agents/<user>.md, which the account can't change.
 """
 import os
 import pwd
+import re
 import shutil
 import socket
 import subprocess
@@ -23,8 +25,12 @@ import sys
 import syslog
 
 CONF = "/etc/add-ai-user/add-ai-user.conf"
-CUSTOM_MESSAGE = "~/.ai/con-refused.txt"
-CUSTOM_MESSAGE_MAX = 64 * 1024
+AGENTS_DIR = "/etc/add-ai-user/agents"
+AGENTS_FILE = "~/AGENTS.md"
+# whatever the path: an unquoted ~/AGENTS.md is expanded by the client's shell, and the file
+# printed is always the one of this account
+AGENTS_COMMAND = re.compile(r"cat\s+(\S*[/\\])?AGENTS\.md")
+AGENTS_MAX = 256 * 1024
 TMUX = shutil.which("tmux") or "/usr/bin/tmux"
 
 
@@ -87,29 +93,26 @@ def refuse(reason):
   Connection refused: {reason}.
 
   On this account everything goes through tmux (default server), so that the
-  work stays visible and is logged in ~/tmux-logs.
+  work stays visible and is logged in ~/tmux-logs. Scp and sftp are allowed.
 
+  AI: read the instructions of this account before anything else:
+      ssh {HOST} cat AGENTS.md
   Human: ssh -t {HOST} tmux new -A -s <name>
-  AI:    ssh {HOST} tmux new -d -s <name>
-         ssh {HOST} "tmux send-keys -t <name> '<command>' Enter"
-         ssh {HOST} tmux capture-pane -p -t <name>
-         (to run a command, type it into a tmux shell with send-keys; keep the
-         double quotes, or your shell drops the inner ones)
-  Files: scp / sftp are still allowed.
 
 """)
-    custom = custom_message()
-    if custom:
-        sys.stderr.write(custom.rstrip("\n") + "\n\n")
     sys.exit(1)
 
 
-def custom_message():
-    try:
-        with open(os.path.expanduser(CUSTOM_MESSAGE), encoding="utf-8", errors="replace") as f:
-            return f.read(CUSTOM_MESSAGE_MAX)
-    except OSError:
-        return ""
+def show_agents():
+    """Print the instructions of the account: the ones it can't change, if it has them."""
+    for path in (os.path.join(AGENTS_DIR, f"{USER}.md"), os.path.expanduser(AGENTS_FILE)):
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                sys.stdout.write(f.read(AGENTS_MAX))
+            return
+        except OSError:
+            continue
+    sys.stdout.write("This account has no instructions yet: everything goes through tmux.\n")
 
 
 def is_sftp(command):
@@ -243,7 +246,7 @@ def check_tmux(args):
 
     table = tmux_command_table()
     commands = split_tmux_commands(args[i:]) or [["new-session"]]
-    needs_tty = False
+    needs_tty = creates_session = False
     for words in commands:
         name = resolve(words[0], table)
         if name not in ALLOWED:
@@ -259,8 +262,10 @@ def check_tmux(args):
             raise Refused("send-keys -K / -X / -R are not allowed")
         if name == "attach-session" or (name == "new-session" and "d" not in flags):
             needs_tty = True
+        creates_session = creates_session or name == "new-session"
     if needs_tty and not os.isatty(0):
         raise Refused("no terminal: add -t to ssh (ssh -t ...) to open tmux")
+    return creates_session
 
 
 def main():
@@ -269,6 +274,9 @@ def main():
     try:
         if not command:
             raise Refused("direct connection without tmux")
+        if AGENTS_COMMAND.fullmatch(command):
+            show_agents()
+            return
         if is_sftp(command):
             if command == "internal-sftp":  # sshd's built-in server can't be run from here
                 command = next((p for p in ("/usr/lib/openssh/sftp-server",
@@ -280,9 +288,11 @@ def main():
         words = split_words(command)
         if not words or os.path.basename(words[0]) != "tmux":
             raise Refused(f"command '{words[0] if words else command}' outside tmux")
-        check_tmux(words[1:])
+        creates_session = check_tmux(words[1:])
     except Refused as e:
         refuse(str(e))
+    if creates_session and not os.isatty(2):
+        sys.stderr.write(f"Read the instructions of this account first: ssh {HOST} cat AGENTS.md\n")
     client = (os.environ.get("SSH_CLIENT") or "?").split()[0]
     syslog.syslog(syslog.LOG_INFO, f"allowed from {client}: {command!r}")
     env = dict(os.environ)

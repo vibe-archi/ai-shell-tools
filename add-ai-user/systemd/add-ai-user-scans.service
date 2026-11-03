@@ -1,0 +1,10 @@
+[Unit]
+Description=add-ai-user: run the security scanners enabled for restricted accounts
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/add-ai-user/restricted/run-scans
+Nice=19
+IOSchedulingClass=idle
+MemoryMax=1G
+CPUQuota=50%
