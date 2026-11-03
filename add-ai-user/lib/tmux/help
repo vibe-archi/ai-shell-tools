@@ -9,7 +9,7 @@ title="${esc}[1;38;5;39m" head="${esc}[1;38;5;214m" key="${esc}[38;5;227m" off="
 sed -e "1s/.*/${title}&${off}/" \
     -e "s/^  \([^ ].*\)$/  ${head}\1${off}/" \
     -e "s/^    \([^ ]\{1,\}\( [^ ]\{1,\}\)*\)/    ${key}\1${off}/" <<'EOF' | less -R -K -~ -Ps' q to close '
- ❐ tmux · byobu-style key bindings                     (Oh my tmux!)
+ ❐ key bindings
 
   WINDOWS (tabs)
     F2                    new window, in the current directory

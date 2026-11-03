@@ -41,26 +41,65 @@ tmux server and watch, and every pane is recorded in `~/tmux-logs` anyway.
 - Missing packages are installed with apt: `tmux git python3 gzip less nano`
   (and `openssh-server`).
 
-## Quick start
+## Getting started
 
 ```bash
 git clone https://github.com/vibe-archi/ai-shell-tools.git && cd ai-shell-tools/add-ai-user
-sudo ./add-ai-user.sh --host server.example.com --key ~/agent_key.pub --message rules.txt bob
+sudo ./add-ai-user.sh bob
 ```
 
-This installs the system part (once), creates `bob`, authorizes the key, writes
-`~bob/AGENTS.md` with `rules.txt` below the default instructions and starts bob's log
-janitor. With a terminal, a new account is first asked for its type, standard or restricted.
-
-Without `--key`, when the user has no key yet, the script asks for one before changing
-anything: paste the public key, check its fingerprint, then confirm it or enter it again.
+Then follow the questions. Nothing is changed before the last answer:
 
 ```
-==> No --key given: paste the SSH public key bob will log in with
+Account type [s = standard, r = restricted] s
+==> Password of bob: it unlocks sudo, and logs in over SSH without a key
+Password:
+Password again:
+==> SSH public key of bob: paste it, or leave it empty to log in with the password
 SSH public key: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... agent@laptop
   key:         ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...k9xYbV2cTn8uE5fHs7dLp agent@laptop
   fingerprint: 256 SHA256:Wq3mJr0k9xYbV2cTn8uE5fHs7dLpA1gZ4iKoR6tMvNe agent@laptop (ED25519)
 Is this the right key? [y = yes, n = enter it again] y
+Disable SSH password login for bob (SSH key only)? [Y/n] y
+```
+
+- **Account type**: standard, or restricted for an agent that only watches the system; a
+  restricted account is then asked what it can read ([Restricted accounts](#restricted-accounts)).
+- **Password**: at least 8 characters, typed twice. A new standard account is a sudoer and sudo
+  asks for this password: when the agent needs it, attach to its session without `-r` and type
+  it in the pane.
+- **SSH key**: optional. Without one, the account logs in with its password.
+- **Password login**: asked once a key is given. Turned off, SSH only accepts the key; the
+  password still unlocks sudo. The choice applies to this account whatever `sshd_config` says
+  (a cloud image often turns password login off for everyone).
+
+The first run installs the system part, then the script creates `bob`, writes `~bob/AGENTS.md`,
+starts bob's log janitor and prints the commands to connect and to watch.
+
+## Options instead of questions
+
+Every answer can be given on the command line, to script the setup or to change an account
+later. With a terminal, the script only asks what the options leave open.
+
+```bash
+# a key, no password login: only the password is still asked
+sudo ./add-ai-user.sh --standard --key ~/agent_key.pub --no-password-login bob
+
+# nothing asked: the password is the first line of bob.pass (delete the file afterwards),
+# the host name shown to agents is given, and rules.txt is added to the instructions for agents
+sudo ./add-ai-user.sh --standard --password-file bob.pass --key ~/agent_key.pub --no-password-login \
+  --host server.example.com --message rules.txt bob
+
+# no key: bob logs in with its password; not a sudoer
+sudo ./add-ai-user.sh --standard --no-key --no-sudo bob
+
+# a restricted account for an agent that connects over SSH, default categories
+sudo ./add-ai-user.sh --restricted --allow defaults --agent-location remote --key ~/agent_key.pub watcher
+
+# later, on the existing account: a new password, another key, password login back on
+sudo ./add-ai-user.sh --update --password bob
+sudo ./add-ai-user.sh --update --key ~/laptop_key.pub bob
+sudo ./add-ai-user.sh --update --password-login bob
 ```
 
 ```
@@ -70,23 +109,37 @@ Usage: sudo ./add-ai-user.sh [options] <user>
        sudo ./add-ai-user.sh --remove <user>
        sudo ./add-ai-user.sh --uninstall
 
+Login:
   -k, --key <file|key>  authorize SSH public key(s), repeatable
       --no-key          don't ask for a key (password login, or keys added later)
+  -p, --password        set a new password on an existing account (asked)
+      --password-file <file>
+                        the password, first line of <file> ("-": standard input)
+      --no-password-login
+                        SSH login with a key only (the password still unlocks sudo)
+      --password-login  SSH login with the password too (always the case without a key)
+      --no-sudo         a standard account without sudo (a new standard account is a sudoer)
+  -s, --sudo            add an existing standard account to the sudo group
+
+Other options:
   -m, --message <file>  your own instructions in ~<user>/AGENTS.md, below the managed block
                         ("default" removes them)
-  -p, --password        set the user's password (asked interactively)
-  -s, --sudo            add the user to the sudo group (asks for a password if it has none)
   -u, --update          <user> already exists: (re)apply the add-ai-user setup to it
       --host <name>     host name shown to agents
       --system-only     install or update the system part only
       --remove <user>   take <user> out of add-ai-user (the account and its files are kept)
       --uninstall       remove add-ai-user from the system (users and their files are kept)
+
+Account type:
       --standard        standard account; turns a restricted account back into a standard one
       --restricted      read-only account, see below
       --allow <list>    categories without asking: defaults, all, none or a comma-separated list
       --agent-location  remote (over SSH, no new outbound connection) or local (a CLI on the server)
   -y, --yes             confirm making an existing account restricted
 ```
+
+An existing account keeps its password, sudo and password login unless an option changes them;
+it is only asked for a password it lacks and needs (for sudo, or without a key).
 
 Running `add-ai-user.sh` again is safe: it updates the system part (and Oh my tmux!) in place.
 `--update` replaces the user's `~/.config/tmux/tmux.conf.local` and keeps the previous
@@ -295,7 +348,9 @@ RESTRICTED_CPU_QUOTA=200%
 ```
 
 Per account: `~/AGENTS.md` (instructions for agents, see above) and
-`~/.config/tmux/tmux.conf.local` (tmux settings, Oh my tmux! style).
+`~/.config/tmux/tmux.conf.local` (tmux settings, Oh my tmux! style). It also shows, for 5
+seconds when someone connects, that the account was set up with add-ai-user, by
+[vibe.archi](https://vibe.archi/): remove the `client-session-changed` hook there to hide it.
 
 ## What gets installed
 
@@ -308,7 +363,8 @@ Per account: `~/AGENTS.md` (instructions for agents, see above) and
 | `/usr/local/bin/tmux-logs` | log reader |
 | `/etc/add-ai-user/add-ai-user.conf` | settings |
 | `/etc/add-ai-user/AGENTS.md`, `AGENTS-restricted.md` | templates of the managed block of `~/AGENTS.md` |
-| `/etc/ssh/sshd_config.d/60-add-ai-user.conf` | `Match Group add-ai-user` + `ForceCommand` |
+| `/etc/ssh/sshd_config.d/60-add-ai-user.conf` | `Match Group add-ai-user` + `ForceCommand`; password login per account |
+| groups `add-ai-key-only`, `add-ai-password-login` | password login off / on for their members |
 | `/etc/systemd/system/add-ai-user-janitor@.{service,timer}` | one janitor timer per account |
 | `~/AGENTS.md` | instructions for agents |
 | `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md` | make the CLIs read `~/AGENTS.md` |
@@ -339,6 +395,8 @@ Only with a restricted account:
 ```bash
 tests/test-gate.sh    # 47+ commands the gate must refuse or allow (run as an add-ai-user account)
 tests/test-logs.sh    # pane-logger chunks and janitor rules, in a temporary directory
+sudo tests/test-login.sh   # throwaway accounts: password, sudo, password login on and off, real SSH
+                           # logins on 127.0.0.1, refusals; deletes them at the end
 tests/test-restricted.sh   # run as a restricted account, in a pane: what it can't do, every granted
                            # diagnostic, bad parameters, rate limit. --all adds the slow scans
 sudo tests/probe-restricted.sh   # what a new host or container allows: sandbox, capabilities, nft

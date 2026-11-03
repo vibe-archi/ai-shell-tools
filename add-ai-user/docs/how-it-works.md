@@ -23,6 +23,11 @@ anything the account can do, including deleting its own logs.
 ```
 Match Group add-ai-user
     ForceCommand /usr/local/lib/add-ai-user/ssh-gate
+Match Group add-ai-key-only
+    PasswordAuthentication no
+    KbdInteractiveAuthentication no
+Match Group add-ai-password-login
+    PasswordAuthentication yes
 Match all
 ```
 
@@ -32,6 +37,20 @@ the client's command in `SSH_ORIGINAL_COMMAND` (empty for an interactive login).
 Why not a fake login shell (`chsh -s gate`)? tmux starts its panes with the login shell,
 so the panes themselves would be refused; `su`, `sudo -iu`, cron... would break too.
 `ForceCommand` only applies to SSH, and the account can't change it.
+
+### Password login
+
+Each account gets a password: it unlocks sudo on a standard account, and logs in over SSH
+when there is no key. Whether SSH accepts it is chosen per account, with two groups. Once
+sshd knows the user name, it reads the `Match` blocks that apply and their values replace
+the global ones, so `add-ai-key-only` turns password login off even where `sshd_config`
+allows it, and `add-ai-password-login` turns it on where a cloud image turned it off for
+everyone (`PasswordAuthentication no` in `sshd_config.d`). An account without a key is
+always in `add-ai-password-login`, since its password is the only way in; with a key, the
+script asks. `--remove` takes the account out of both groups: `sshd_config` decides again.
+
+The password is read without echo, typed twice, and handed to `chpasswd` on its standard
+input, so it never appears in a command line.
 
 ### What the gate does
 
@@ -137,6 +156,11 @@ byobu's best parts ported into `tmux.conf.local`:
 - UTF-8: ssh from Windows sends no locale, so tmux would replace its symbols with `_`.
   The gate and `~/.bashrc` set `LANG=C.UTF-8` when needed, and `tmux.conf.local` sets it
   in tmux's global environment for popups and editors.
+- A credit, "set up with add-ai-user, by https://vibe.archi/", in the status line for 5
+  seconds when a client connects. The `client-session-changed` hook also covers `tmux new
+  -A` creating the session, which `client-attached` misses; it shows the message only while
+  `client_activity` still equals `client_created`, so not again when a key switches
+  sessions. An agent's `tmux new -d` has no client: its output stays clean.
 
 Oh my tmux! is cloned once in `/usr/local/lib/add-ai-user/oh-my-tmux` and linked from every
 account's `~/.config/tmux/tmux.conf`; running `add-ai-user.sh` again updates it.

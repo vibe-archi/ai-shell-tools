@@ -41,17 +41,20 @@ privilege escalation, nothing outside its home can be changed, and it reads logs
 disks, security state and so on through fixed diagnostics, category by category. See
 [Restricted accounts](add-ai-user/README.md#restricted-accounts).
 
-### Quick start
+### Getting started
 
-On the server (Debian or Ubuntu, as root):
+On the server (Debian or Ubuntu):
 
 ```bash
-git clone https://github.com/vibe-archi/ai-shell-tools.git
-cd ai-shell-tools/add-ai-user
-sudo ./add-ai-user.sh --host server.example.com bob   # asks for bob's SSH public key
+git clone https://github.com/vibe-archi/ai-shell-tools.git && cd ai-shell-tools/add-ai-user
+sudo ./add-ai-user.sh bob
 ```
 
-Then:
+Then follow the questions: the account type, bob's password, its SSH public key (optional,
+without one bob logs in with the password) and whether SSH password login is turned off. On a
+standard account, the password also unlocks sudo.
+
+The agent then works through tmux, and you watch it:
 
 ```bash
 ssh bob@server.example.com tmux new -d -s fix-login                          # the agent...
@@ -63,9 +66,30 @@ ssh -t bob@server.example.com tmux attach -r -t fix-login                    # y
 By default, the rules shown to a refused agent ask it to give its tmux session a short,
 descriptive name and to tell you the command to watch it, like the last line above.
 
-More: [add-ai-user/README.md](add-ai-user/README.md) (options, key bindings, logs,
-configuration) and [add-ai-user/docs/how-it-works.md](add-ai-user/docs/how-it-works.md)
-(the SSH gate's rules, the recording pipeline, design choices).
+### Options instead of questions
+
+Every answer can also be given on the command line, to script the setup or to change an
+account later:
+
+```bash
+# a key, no password login: only the password is still asked
+sudo ./add-ai-user.sh --standard --key ~/agent_key.pub --no-password-login bob
+
+# nothing asked: the password is the first line of bob.pass (delete the file afterwards)
+sudo ./add-ai-user.sh --standard --password-file bob.pass --key ~/agent_key.pub --no-password-login bob
+
+# a restricted account for an agent that connects over SSH, default categories
+sudo ./add-ai-user.sh --restricted --allow defaults --agent-location remote --key ~/agent_key.pub watcher
+
+# later: a new password, another key
+sudo ./add-ai-user.sh --update --password bob
+sudo ./add-ai-user.sh --update --key ~/laptop_key.pub bob
+```
+
+`sudo ./add-ai-user.sh --help` lists them all. More: [add-ai-user/README.md](add-ai-user/README.md)
+(options, key bindings, logs, configuration) and
+[add-ai-user/docs/how-it-works.md](add-ai-user/docs/how-it-works.md) (the SSH gate's rules, the
+recording pipeline, design choices).
 
 ## setup-ubuntu-rdp
 

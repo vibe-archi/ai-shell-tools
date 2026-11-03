@@ -453,6 +453,12 @@ bind F12 send-prefix -2
 bind -n F1   display-popup -E -b rounded -w 90% -h 90% -T " Help " "/usr/local/lib/add-ai-user/tmux/help"
 bind -n S-F1 list-keys
 
+# credit in the status line for 5 s when a client connects: attach or new session, not a
+# session switch (a key since the connection makes client_activity differ from client_created)
+%if #{>=:#{version},3.2}
+set-hook -g client-session-changed 'if -F "#{==:#{client_created},#{client_activity}}" "display-message -d 5000 \"This account was set up with add-ai-user, by https://vibe.archi/\""'
+%endif
+
 # windows
 bind -n F2      new-window
 bind -n F3      previous-window

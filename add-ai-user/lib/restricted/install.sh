@@ -142,7 +142,6 @@ confirm_switch() {  # an existing account becomes restricted
 
 ask_restricted() {  # sets CATEGORIES, SCANNERS and LOCATION; nothing is changed yet
   local state=$RESTRICTED_DIR/$TARGET.conf category
-  $SUDO && die "--sudo makes no sense on a restricted account"
   CATEGORIES='' SCANNERS=''
   if [ -f "$state" ]; then  # an update keeps what isn't asked to change
     if [ -z "$LOCATION" ]; then LOCATION=$(. "$state"; echo "$LOCATION"); fi
