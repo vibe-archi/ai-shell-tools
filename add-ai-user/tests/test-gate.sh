@@ -61,13 +61,26 @@ t allowed 'tmux kill-session -t gatetest'
 t allowed 'tmux wait-for -S nothing-waits'
 t allowed '/usr/lib/openssh/sftp-server'
 
-custom=~/.ai/con-refused.txt
-if [ -s "$custom" ]; then
-  out=$(SSH_ORIGINAL_COMMAND='' "$gate" </dev/null 2>&1)
-  if grep -qF -- "$(head -1 "$custom")" <<<"$out"; then
-    echo " ok  refused  (custom message of $custom shown)"
+t refused 'cat /etc/passwd'
+t refused 'cat ~/AGENTS.md ; id'
+t refused 'cat ~/AGENTS.md /etc/passwd'
+t refused 'cat AGENTS.md.bak'
+t allowed 'cat ~/AGENTS.md'
+t allowed 'cat AGENTS.md'
+t allowed 'cat /home/someone/AGENTS.md'
+
+out=$(SSH_ORIGINAL_COMMAND='' "$gate" </dev/null 2>&1)
+if grep -qF 'cat AGENTS.md' <<<"$out"; then
+  echo " ok  refused  (the refusal points to AGENTS.md)"
+else
+  echo "FAIL refused  (the refusal doesn't point to AGENTS.md)"; fails=$((fails + 1))
+fi
+if [ -r ~/AGENTS.md ]; then
+  out=$(SSH_ORIGINAL_COMMAND='cat ~/AGENTS.md' "$gate" </dev/null 2>/dev/null)
+  if grep -qF 'add-ai-user:begin' <<<"$out"; then
+    echo " ok  allowed  (cat ~/AGENTS.md prints the instructions)"
   else
-    echo "FAIL refused  (custom message of $custom missing)"; fails=$((fails + 1))
+    echo "FAIL allowed  (cat ~/AGENTS.md prints no instructions)"; fails=$((fails + 1))
   fi
 fi
 echo "$fails failure(s)"

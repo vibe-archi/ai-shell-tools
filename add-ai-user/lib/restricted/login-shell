@@ -1,0 +1,10 @@
+#!/bin/bash
+# Login shell of the restricted accounts: everything they start, over SSH or in a tmux pane,
+# runs with no_new_privs (setuid programs and file capabilities give nothing), and one file
+# can't grow past 1 GiB. sshd runs its ForceCommand through this shell too, so the SSH gate
+# and the tmux server are covered.
+ulimit -f 1048576
+if [ $# -eq 0 ]; then
+  exec /usr/bin/setpriv --no-new-privs /bin/bash --login
+fi
+exec /usr/bin/setpriv --no-new-privs /bin/bash "$@"

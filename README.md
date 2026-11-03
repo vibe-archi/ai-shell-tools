@@ -26,14 +26,20 @@ agent, where everything has to happen in tmux:
 - **Read it back later.** Every tmux pane is recorded in `~/tmux-logs`: compressed, kept
   30 days, capped at 2 GB per account. `tmux-logs` lists, reads, replays and searches
   the recordings.
-- **Your rules.** The text of `~/.ai/con-refused.txt` is added to the refusal message, to
-  tell agents how they must work on this account. The default rules ask them to name
-  their session after their task and to share the command to watch it.
+- **Your rules.** `~/AGENTS.md` tells agents how they must work on this account, and you can
+  add your own instructions. By default it asks them to name their session after their task
+  and to share the command to watch it.
 - **A comfortable tmux for humans too.** Oh my tmux! with byobu-style F-keys, mouse
   support, an F1 cheat sheet and an F9 menu.
 
-It is a visibility tool, not a sandbox: once in a pane, an agent can do whatever the
-account can do. It keeps honest agents in plain sight; it does not stop a hostile one.
+A standard account is a visibility tool, not a sandbox: once in a pane, an agent can do
+whatever the account can do. It keeps honest agents in plain sight; it does not stop a
+hostile one.
+
+For an agent that should only watch a system, choose a **restricted** account: no sudo, no
+privilege escalation, nothing outside its home can be changed, and it reads logs, network,
+disks, security state and so on through fixed diagnostics, category by category. See
+[Restricted accounts](add-ai-user/README.md#restricted-accounts).
 
 ### Quick start
 

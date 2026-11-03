@@ -1,0 +1,28 @@
+#!/bin/bash
+# Run the scanners enabled for the restricted accounts and keep their latest output in
+# /var/lib/add-ai-user/scans, for the security_scans collector. Started by a timer, never by
+# an agent. Fixed commands only: no update of a baseline, no fix, no quarantine.
+set -uo pipefail
+ENABLED=/etc/add-ai-user/restricted/scanners
+OUT=/var/lib/add-ai-user/scans
+[ -r "$ENABLED" ] || exit 0
+install -d -m 750 "$OUT"
+
+scan() {
+  local name=$1 tmp
+  shift
+  grep -qxF "$name" "$ENABLED" || return 0
+  command -v "$1" >/dev/null || return 0
+  tmp=$(mktemp "$OUT/.$name.XXXXXX")
+  timeout 3h nice -n 19 ionice -c 3 "$@" >"$tmp" 2>&1
+  printf '\nexit code: %s\n' "$?" >>"$tmp"
+  chmod 640 "$tmp"
+  mv -f "$tmp" "$OUT/$name.txt"
+}
+
+scan lynis lynis audit system --cronjob --no-colors --no-log
+scan debsums debsums -s
+scan rkhunter rkhunter --check --skip-keypress --nocolors --report-warnings-only
+scan chkrootkit chkrootkit -q
+scan debsecan debsecan --format summary
+exit 0

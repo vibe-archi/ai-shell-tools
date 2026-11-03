@@ -1,0 +1,867 @@
+#!/usr/bin/python3 -I
+"""add-ai-user diagnostics collector, started by systemd for one connection on a socket
+(ai-diag-<profile>.socket), with the rights of that profile: diag-helper <profile>.
+
+Reads one JSON line {"category", "preset", "params"}, runs the fixed command of the preset,
+never through a shell, and answers one JSON frame. Parameters only come from lists built
+here, so a request can choose among known values but never supply a path or an option.
+"""
+import datetime
+import fcntl
+import glob
+import grp
+import hashlib
+import ipaddress
+import json
+import os
+import pwd
+import re
+import selectors
+import shutil
+import signal
+import socket
+import ssl
+import stat
+import struct
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import catalog  # noqa: E402
+
+REQUEST_MAX = 4096
+REQUEST_TIMEOUT = 5
+OUTPUT_MAX = 256 * 1024
+RAW_MAX = 8 * 1024 * 1024
+RATE_BURST = 60
+RATE_PER_SECOND = 1.0
+TARGETS_FILE = "/etc/add-ai-user/restricted/targets"
+SCANS_DIR = "/var/lib/add-ai-user/scans"
+PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
+ENV = {"PATH": PATH, "LANG": "C", "LC_ALL": "C", "HOME": "/nonexistent", "TERM": "dumb", "PAGER": "cat",
+       "SYSTEMD_PAGER": "cat", "SYSTEMD_PAGERSECURE": "1", "SYSTEMD_COLORS": "0", "LESSSECURE": "1",
+       "DPKG_PAGER": "cat", "PSQL_PAGER": "cat", "WG_HIDE_KEYS": "always", "REDISCLI_HISTFILE": "/dev/null",
+       "NO_COLOR": "1", "DEBIAN_FRONTEND": "noninteractive"}
+
+ANSI = re.compile(r"\x1b(\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(\x07|\x1b\\)|[@-Z\\-_])")
+CONTROL = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f؜‎‏‪-‮⁦-⁩]")
+
+
+class Invalid(Exception):
+    """The request is refused: status "invalid"."""
+
+
+class Unavailable(Exception):
+    """The diagnostic can't run here: status "unavailable"."""
+
+
+def clean(text):
+    return CONTROL.sub("", ANSI.sub("", text))
+
+
+def run_one(argv, timeout, stdin_data=None):
+    """Run argv without a shell: (exit code, text, cut because too long, timed out)."""
+    tool = shutil.which(argv[0], path=PATH)
+    if not tool:
+        raise Unavailable(f"{argv[0]} is not installed")
+    proc = subprocess.Popen([tool] + argv[1:], env=ENV, cwd="/", start_new_session=True, close_fds=True,
+                            stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if stdin_data is not None:
+        proc.stdin.write(stdin_data)
+        proc.stdin.close()
+    selector = selectors.DefaultSelector()
+    selector.register(proc.stdout, selectors.EVENT_READ)
+    deadline = time.monotonic() + timeout
+    chunks, size, cut, timed_out = [], 0, False, False
+    while True:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            timed_out = True
+            break
+        if not selector.select(left):
+            continue
+        chunk = os.read(proc.stdout.fileno(), 65536)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        size += len(chunk)
+        if size > RAW_MAX:
+            cut = True
+            break
+    if timed_out or cut:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    try:
+        code = proc.wait(2)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        code = proc.wait()
+    proc.stdout.close()
+    return code, b"".join(chunks).decode("utf-8", errors="replace"), cut, timed_out
+
+
+# -- parameters: each one returns the value to use, or says what is accepted -------------
+
+def _choose(field, value, choices):
+    if value not in choices:
+        listed = ", ".join(sorted(str(c) for c in choices)[:40]) or "none here"
+        raise Invalid(f"{field} must be one of: {listed}")
+    return choices[value] if isinstance(choices, dict) else value
+
+
+def p_unit(field, value):
+    if not re.fullmatch(r"[A-Za-z0-9:_.@\\-]{1,128}\.(service|socket|timer|mount|path|target|scope|slice)", value) \
+            or value.startswith("-"):
+        raise Invalid(f"{field} must be a unit name such as ssh.service")
+    code, text, _, _ = run_one(["systemctl", "--no-pager", "--plain", "--no-legend", "list-unit-files", "--", value], 10)
+    code2, text2, _, _ = run_one(["systemctl", "--no-pager", "--plain", "--no-legend", "list-units", "--all", "--", value], 10)
+    if value not in text and value not in text2:
+        raise Invalid(f"{field}: no such unit")
+    return value
+
+
+def p_since(field, value):
+    return _choose(field, value, {"15m": "-15m", "1h": "-1h", "6h": "-6h", "24h": "-24h"})
+
+
+def p_interface(field, value):
+    return _choose(field, value, set(os.listdir("/sys/class/net")))
+
+
+def default_gateway():
+    try:
+        with open("/proc/net/route", encoding="ascii") as f:
+            for line in f.readlines()[1:]:
+                fields = line.split()
+                if fields[1] == "00000000":
+                    return socket.inet_ntoa(struct.pack("<L", int(fields[2], 16)))
+    except OSError:
+        pass
+    return None
+
+
+def resolvers():
+    found = []
+    for path in ("/run/systemd/resolve/resolv.conf", "/etc/resolv.conf"):
+        try:
+            with open(path, encoding="utf-8") as f:
+                found += [line.split()[1] for line in f if line.startswith("nameserver ")]
+        except OSError:
+            continue
+        if found:
+            break
+    return [r for r in found if r != "127.0.0.53"]
+
+
+def target_list():
+    """Identifiers an agent can name: loopback, gateway, resolvers, then the admin's list."""
+    targets = {"loopback": "127.0.0.1"}
+    gateway = default_gateway()
+    if gateway:
+        targets["gateway"] = gateway
+    for i, resolver in enumerate(resolvers(), start=1):
+        targets[f"resolver{i}"] = resolver
+    try:
+        with open(TARGETS_FILE, encoding="utf-8") as f:
+            for line in f:
+                words = line.split("#", 1)[0].split()
+                if len(words) == 2 and re.fullmatch(r"[A-Za-z0-9_-]{1,32}", words[0]) \
+                        and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.:-]{0,252}", words[1]):
+                    targets[words[0]] = words[1]
+    except OSError:
+        pass
+    return targets
+
+
+def p_target(field, value):
+    host = _choose(field, value, target_list())
+    try:
+        infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+    except OSError:
+        raise Unavailable(f"{value} does not resolve")
+    for info in infos:
+        address = ipaddress.ip_address(info[4][0].split("%")[0])
+        if address.is_link_local or address.is_multicast or address.is_unspecified:
+            raise Invalid(f"{field}: {value} resolves to a forbidden address")
+    return host
+
+
+def p_dns_type(field, value):
+    return _choose(field, value, {"A", "AAAA", "MX", "TXT", "NS", "PTR", "SOA"})
+
+
+def p_disk(field, value):
+    disks = {d: f"/dev/{d}" for d in os.listdir("/sys/block") if not re.match(r"(loop|ram|md|dm-|sr|zram)", d)}
+    return _choose(field, value, disks)
+
+
+def p_nvme(field, value):
+    try:
+        controllers = {c: f"/dev/{c}" for c in os.listdir("/sys/class/nvme")}
+    except OSError:
+        controllers = {}
+    return _choose(field, value, controllers)
+
+
+def p_md(field, value):
+    return _choose(field, value, {d: f"/dev/{d}" for d in os.listdir("/sys/block") if d.startswith("md")})
+
+
+def _mounts(fstype):
+    mounts = set()
+    with open("/proc/self/mountinfo", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            left, right = line.split(" - ", 1)
+            if right.split()[0] == fstype:
+                mounts.add(left.split()[4])
+    return mounts
+
+
+def p_btrfs_mount(field, value):
+    return _choose(field, value, _mounts("btrfs"))
+
+
+def p_xfs_mount(field, value):
+    return _choose(field, value, _mounts("xfs"))
+
+
+def p_local_user(field, value):
+    return _choose(field, value, {u.pw_name for u in pwd.getpwall()})
+
+
+def p_jail(field, value):
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", value):
+        raise Invalid(f"{field} must be the name of a jail")
+    _, text, _, _ = run_one(["fail2ban-client", "status"], 10)
+    match = re.search(r"Jail list:\s*(.*)", text)
+    return _choose(field, value, {j.strip() for j in match.group(1).split(",")} if match else set())
+
+
+def p_docker_name(field, value):
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", value):
+        raise Invalid(f"{field} must be the name of a container")
+    _, text, _, _ = run_one(["docker", "ps", "-a", "--format", "{{.Names}}"], 15)
+    return _choose(field, value, set(text.split()))
+
+
+def p_listening_port(field, value):
+    ports = set()
+    for path, state in (("tcp", "0A"), ("tcp6", "0A"), ("udp", "07"), ("udp6", "07")):
+        try:
+            with open(f"/proc/net/{path}", encoding="ascii") as f:
+                for line in f.readlines()[1:]:
+                    fields = line.split()
+                    if fields[3] == state:
+                        ports.add(str(int(fields[1].split(":")[1], 16)))
+        except OSError:
+            continue
+    return _choose(field, value, ports)
+
+
+PARAM_TYPES = {name[2:]: fn for name, fn in list(globals().items()) if name.startswith("p_")}
+PARAM_DEFAULTS = {"since": "1h", "type": "A"}
+
+
+def check_params(preset, params):
+    if not isinstance(params, dict) or not all(isinstance(v, str) and len(v) <= 256 for v in params.values()):
+        raise Invalid("params must be short strings")
+    unknown = set(params) - set(preset["params"])
+    if unknown:
+        raise Invalid(f"this diagnostic takes: {', '.join(preset['params']) or 'no parameter'}")
+    values = {}
+    for field, kind in preset["params"].items():
+        value = params.get(field, PARAM_DEFAULTS.get(field))
+        if value is None:
+            raise Invalid(f"{field}= is required")
+        values[field] = PARAM_TYPES[kind](field, value)
+    return values
+
+
+def fill(argv, values):
+    filled = []
+    for word in argv:
+        for field, value in values.items():
+            word = word.replace("{" + field + "}", value)
+        filled.append(word)
+    return filled
+
+
+# -- filters applied to the output of a command --------------------------------------------
+
+USER_FIELDS = re.compile(
+    r"((?:[Ii]nvalid user|Failed \S+ for(?: invalid user)?|Accepted \S+ for|authenticating user|"
+    r"(?:invalid|illegal) user|user|for user|session opened for user|session closed for user)[ =])(\S+)")
+SECRETS = re.compile(r"(?i)((?:password|passwd|pwd|secret|token|api[_-]?key|authorization)\s*[=:]\s*)\S+")
+
+
+def scrub(message):
+    return SECRETS.sub(r"\1<removed>", USER_FIELDS.sub(r"\1<removed>", message))
+
+
+def post_journal(text):
+    lines = []
+    for raw in text.splitlines():
+        try:
+            entry = json.loads(raw)
+        except ValueError:
+            continue
+        message = entry.get("MESSAGE", "")
+        if isinstance(message, list):
+            message = bytes(b & 0xFF for b in message).decode("utf-8", errors="replace")
+        stamp = datetime.datetime.fromtimestamp(int(entry.get("__REALTIME_TIMESTAMP", 0)) / 1e6, datetime.timezone.utc)
+        source = entry.get("_SYSTEMD_UNIT") or entry.get("SYSLOG_IDENTIFIER") or "kernel"
+        lines.append(f"{stamp:%Y-%m-%dT%H:%M:%SZ} p{entry.get('PRIORITY', '?')} {source}: {scrub(str(message))[:2048]}")
+    return "\n".join(lines) + "\n"
+
+
+def post_apt_upgrades(text):
+    return "\n".join(line for line in text.splitlines() if line.startswith("Inst ")) + "\n"
+
+
+def post_wg_redact(text):
+    return re.sub(r"[A-Za-z0-9+/]{43}=", lambda m: "peer-" + hashlib.sha256(m.group().encode()).hexdigest()[:8], text)
+
+
+def post_smart_redact(text):
+    text = re.sub(r'(?i)"(serial_number|serialnumber|sn|wwn|logical_unit_id)"\s*:\s*("[^"]*"|\{[^}]*\}|\d+)', r'"\1": "removed"', text)
+    return re.sub(r"(?im)^(\s*(Serial Number|LU WWN Device Id):).*$", r"\1 removed", text)
+
+
+def post_dmi_redact(text):
+    return re.sub(r"(?im)^(\s*(Serial Number|UUID|Asset Tag|Part Number):).*$", r"\1 removed", text)
+
+
+def post_passwd_fields(text):
+    lines = []
+    for line in text.splitlines():
+        f = line.split(":")
+        if len(f) == 7:
+            lines.append(":".join([f[0], f[2], f[3], f[5], f[6]]))
+    return "name:uid:gid:home:shell\n" + "\n".join(lines) + "\n"
+
+
+SSHD_KEYS = {"port", "listenaddress", "permitrootlogin", "passwordauthentication", "pubkeyauthentication",
+             "kbdinteractiveauthentication", "authenticationmethods", "permitemptypasswords", "usepam", "maxauthtries",
+             "allowusers", "denyusers", "allowgroups", "denygroups", "x11forwarding", "allowtcpforwarding",
+             "gatewayports", "permittunnel", "disableforwarding", "clientaliveinterval", "logingracetime",
+             "ciphers", "macs", "kexalgorithms", "hostkeyalgorithms", "pubkeyacceptedalgorithms", "loglevel"}
+
+
+def post_sshd_allowlist(text):
+    return "\n".join(line for line in text.splitlines() if line.split(" ", 1)[0] in SSHD_KEYS) + "\n"
+
+
+def post_apache_counters(text):
+    keep = re.compile(r"(Total Accesses|Total kBytes|Uptime|ReqPerSec|BytesPerSec|BusyWorkers|IdleWorkers|ConnsTotal):")
+    return "\n".join(line for line in text.splitlines() if keep.match(line)) + "\n"
+
+
+def post_mail_counts(text):
+    queues = {}
+    for line in text.splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        count, size = queues.get(entry.get("queue_name", "?"), (0, 0))
+        queues[entry.get("queue_name", "?")] = (count + 1, size + int(entry.get("message_size", 0)))
+    if not queues:
+        return "mail queue empty\n"
+    return "".join(f"{q}: {c} messages, {s} bytes\n" for q, (c, s) in sorted(queues.items()))
+
+
+# -- diagnostics that read data rather than run one fixed command ---------------------------
+
+def read_text(path, limit=OUTPUT_MAX):
+    with open(path, encoding="utf-8", errors="replace") as f:
+        return f.read(limit)
+
+
+def fn_reboot_required(preset, values):
+    if not os.path.exists("/run/reboot-required"):
+        return "no reboot pending\n"
+    try:
+        packages = read_text("/run/reboot-required.pkgs")
+    except OSError:
+        packages = ""
+    return "reboot required\n" + packages
+
+
+def fn_pressure(preset, values):
+    out = []
+    for kind in ("cpu", "memory", "io"):
+        try:
+            out.append(f"{kind}:\n{read_text('/proc/pressure/' + kind)}")
+        except OSError:
+            raise Unavailable("pressure stall information is not available here")
+    return "".join(out)
+
+
+def fn_tainted(preset, values):
+    flags = "PFSRMBUDAWCIOELKXT"
+    value = int(read_text("/proc/sys/kernel/tainted").strip())
+    letters = "".join(flag for bit, flag in enumerate(flags) if value >> bit & 1)
+    return f"tainted={value} {letters}\n"
+
+
+def fn_mdstat(preset, values):
+    try:
+        return read_text("/proc/mdstat")
+    except OSError:
+        raise Unavailable("no software RAID here")
+
+
+def fn_directory_sizes(preset, values):
+    roots = [d for d in ("/var", "/home", "/srv", "/opt", "/tmp", "/usr", "/root") if os.path.isdir(d)]
+    _, text, _, timed_out = run_one(["du", "-x", "-h", "-d", "1", "--"] + roots, preset["timeout"])
+    if timed_out:
+        raise TimeoutError
+    return text
+
+
+def certificate_summary(der):
+    _, text, _, _ = run_one(["openssl", "x509", "-inform", "DER", "-noout", "-subject", "-issuer", "-dates",
+                             "-fingerprint", "-sha256"], 10, stdin_data=der)
+    return text
+
+
+def fn_tls_probe(preset, values):
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    host = values["target"]
+    try:
+        with socket.create_connection((host, 443), timeout=5) as raw:
+            with context.wrap_socket(raw, server_hostname=host) as tls:
+                return f"protocol={tls.version()}\n" + certificate_summary(tls.getpeercert(binary_form=True))
+    except OSError as e:
+        raise Unavailable(f"cannot reach {values['target']} on port 443: {e.__class__.__name__}")
+
+
+def fn_tls_expiry(preset, values):
+    paths = glob.glob("/etc/letsencrypt/live/*/cert.pem") + glob.glob("/etc/xrdp/cert.pem") \
+        + glob.glob("/etc/nginx/**/*.crt", recursive=True) + glob.glob("/etc/apache2/**/*.crt", recursive=True) \
+        + glob.glob("/etc/ssl/certs/ssl-cert-*.pem")
+    if not paths:
+        raise Unavailable("no local certificate found")
+    out = []
+    for path in sorted(set(paths))[:200]:
+        _, text, _, _ = run_one(["openssl", "x509", "-noout", "-enddate", "-subject", "-in", path], 10)
+        out.append(f"{path}: " + " ".join(text.split()) + "\n")
+    return "".join(out)
+
+
+UTMP = struct.Struct("<hxxi32s4s32s256shhii4i20s")
+
+
+def utmp_records(path):
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        f.seek(max(0, f.tell() - 4096 * UTMP.size))
+        data = f.read()
+    for i in range(0, len(data) - UTMP.size + 1, UTMP.size):
+        yield UTMP.unpack_from(data, i)
+
+
+def _field(raw):
+    return raw.split(b"\0", 1)[0].decode("utf-8", errors="replace")
+
+
+def fn_wtmp_logins(preset, values):
+    if shutil.which("wtmpdb", path=PATH):
+        _, text, _, _ = run_one(["wtmpdb", "last", "-n", "200"], 15)
+        if text.strip():
+            return text
+    lines = []
+    for record in utmp_records("/var/log/wtmp") if os.path.exists("/var/log/wtmp") else ():
+        if record[0] == 7:
+            when = datetime.datetime.fromtimestamp(record[8], datetime.timezone.utc)
+            lines.append(f"{when:%Y-%m-%dT%H:%M:%SZ} {_field(record[4])} {_field(record[2])} {_field(record[5])}")
+    if not lines:  # recent systems may no longer write wtmp: sshd still logs its logins
+        _, text, _, _ = run_one(["journalctl", "--no-pager", "-q", "-o", "short-iso", "-u", "ssh", "-u", "sshd",
+                                 "--since=-30d", "-n", "20000"], preset["timeout"])
+        for line in text.splitlines():
+            match = re.search(r"Accepted (\S+) for (\S+) from (\S+)", line)
+            if match:
+                lines.append(f"{line.split()[0]} {match.group(2)} {match.group(1)} {match.group(3)}")
+    if not lines:
+        raise Unavailable("no login recorded in wtmp or in the journal of sshd")
+    return "\n".join(lines[-200:]) + "\n"
+
+
+def fn_failed_logins(preset, values):
+    known = {u.pw_name for u in pwd.getpwall()}
+    counts = {}
+
+    def add(address, valid):
+        try:
+            ipaddress.ip_address(address)
+        except ValueError:
+            address = "other"
+        good, bad = counts.get(address, (0, 0))
+        counts[address] = (good + 1, bad) if valid else (good, bad + 1)
+
+    if os.path.exists("/var/log/btmp"):
+        for record in utmp_records("/var/log/btmp"):
+            add(_field(record[5]), _field(record[4]) in known)
+    pattern = re.compile(r"(Failed \S+ for (invalid user )?|Invalid user ).* from (\S+)")
+    _, text, _, _ = run_one(["journalctl", "--no-pager", "-q", "-o", "cat", "-u", "ssh", "-u", "sshd",
+                             "--since=-24h", "-n", "5000"], preset["timeout"])
+    for line in text.splitlines():
+        match = pattern.search(line)
+        if match:
+            add(match.group(3), not (match.group(2) or match.group(1).startswith("Invalid")))
+    if not counts:
+        return "no failed login recorded\n"
+    rows = sorted(counts.items(), key=lambda item: -sum(item[1]))[:200]
+    return "address attempts_on_existing_accounts attempts_on_unknown_accounts\n" \
+        + "".join(f"{a} {g} {b}\n" for a, (g, b) in rows)
+
+
+def file_line(path):
+    st = os.lstat(path)
+    digest = "-"
+    if stat.S_ISREG(st.st_mode):
+        with open(path, "rb") as f:
+            digest = hashlib.sha256(f.read(16 * 1024 * 1024)).hexdigest()
+    try:
+        owner = pwd.getpwuid(st.st_uid).pw_name
+    except KeyError:
+        owner = str(st.st_uid)
+    mtime = datetime.datetime.fromtimestamp(st.st_mtime, datetime.timezone.utc)
+    return f"{stat.filemode(st.st_mode)} {owner} {st.st_size} {mtime:%Y-%m-%dT%H:%MZ} {digest} {path}\n"
+
+
+def fn_sudo_policy(preset, values):
+    out = []
+    for name in ("sudo", "admin", "wheel"):
+        try:
+            out.append(f"group {name}: {', '.join(grp.getgrnam(name).gr_mem) or '(no member)'}\n")
+        except KeyError:
+            pass
+    paths = ["/etc/sudoers"] + sorted(glob.glob("/etc/sudoers.d/*"))
+    for path in paths:
+        try:
+            out.append(file_line(path))
+            text = read_text(path)
+        except OSError:
+            continue
+        joined = re.sub(r"\\\n", " ", text)
+        for line in joined.splitlines():
+            line = line.split("#", 1)[0].strip()
+            if not line or line.startswith(("Defaults", "@", "Cmnd_Alias", "User_Alias", "Host_Alias", "Runas_Alias")):
+                continue
+            words = line.split()
+            out.append(f"  rule principal={words[0]} nopasswd={'NOPASSWD' in line} all_commands={line.endswith('ALL')}\n")
+    return "".join(out)
+
+
+def fn_authorized_keys(preset, values):
+    out = []
+    for user in pwd.getpwall():
+        path = os.path.join(user.pw_dir, ".ssh/authorized_keys")
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except OSError:
+            continue
+        with os.fdopen(fd, "rb") as f:
+            if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+                continue
+            data = f.read(1024 * 1024)
+        _, text, _, _ = run_one(["ssh-keygen", "-l", "-f", "-"], 10, stdin_data=data)
+        for line in text.splitlines():
+            words = line.split()
+            if len(words) >= 3 and words[1].startswith(("SHA256:", "MD5:")):
+                out.append(f"{user.pw_name} {words[0]} {words[1]} {words[-1]}\n")
+    return "".join(out) or "no authorized key found\n"
+
+
+def fn_startup_files(preset, values):
+    single = ["/etc/crontab", "/etc/rc.local", "/etc/ld.so.preload", "/etc/environment"]
+    trees = ["/etc/cron.d", "/etc/cron.hourly", "/etc/cron.daily", "/etc/cron.weekly", "/etc/cron.monthly",
+             "/etc/udev/rules.d", "/etc/profile.d", "/etc/ld.so.conf.d", "/etc/modules-load.d", "/etc/sudoers.d"]
+    paths = [p for p in single if os.path.lexists(p)]
+    for tree in trees:
+        if os.path.isdir(tree):
+            paths += [os.path.join(tree, n) for n in sorted(os.listdir(tree))]
+    out = []
+    for path in paths:
+        try:
+            out.append(file_line(path))
+        except OSError:
+            pass
+    return "mode owner size mtime sha256 path\n" + "".join(out)
+
+
+def fn_crontabs(preset, values):
+    out = []
+    spool = "/var/spool/cron/crontabs"
+    try:
+        names = sorted(os.listdir(spool))
+    except OSError:
+        return "no user crontab\n"
+    for name in names:
+        try:
+            text = read_text(os.path.join(spool, name))
+        except OSError:
+            continue
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or re.match(r"[A-Za-z_][A-Za-z0-9_]*\s*=", line):
+                continue
+            words = line.split()
+            count = 1 if words[0].startswith("@") else 5
+            if len(words) > count:
+                out.append(f"{name} {' '.join(words[:count])} {words[count]}\n")
+    return "".join(out) or "no user crontab\n"
+
+
+def fn_process_hardening(preset, values):
+    out = ["pid name uid seccomp no_new_privs cap_eff\n"]
+    for pid in (d for d in os.listdir("/proc") if d.isdigit()):
+        try:
+            fields = dict(line.split(":\t", 1) for line in read_text(f"/proc/{pid}/status").splitlines() if ":\t" in line)
+        except OSError:
+            continue
+        out.append(f"{pid} {fields.get('Name', '?')} {fields.get('Uid', '?').split()[0]} {fields.get('Seccomp', '?')} "
+                   f"{fields.get('NoNewPrivs', '?')} {fields.get('CapEff', '?')}\n")
+    return "".join(out)
+
+
+def fn_suricata_alerts(preset, values):
+    path = "/var/log/suricata/eve.json"
+    if not os.path.exists(path):
+        raise Unavailable("Suricata is not logging here")
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        f.seek(max(0, f.tell() - 4 * 1024 * 1024))
+        lines = f.read().decode("utf-8", errors="replace").splitlines()
+    out = []
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if event.get("event_type") == "alert":
+            alert = event.get("alert", {})
+            out.append(f"{event.get('timestamp')} {event.get('proto')} {event.get('src_ip')} {event.get('dest_ip')} "
+                       f"sid={alert.get('signature_id')} severity={alert.get('severity')}\n")
+    return "".join(out[-200:]) or "no alert\n"
+
+
+def fn_scan_status(preset, values):
+    out = []
+    for name in catalog.SCANNERS:
+        path = os.path.join(SCANS_DIR, name + ".txt")
+        if os.path.exists(path):
+            when = datetime.datetime.fromtimestamp(os.path.getmtime(path), datetime.timezone.utc)
+            out.append(f"{name}: last run {when:%Y-%m-%dT%H:%MZ}\n")
+        else:
+            out.append(f"{name}: no result yet\n")
+    return "".join(out)
+
+
+def fn_scan_result(preset, values):
+    path = os.path.join(SCANS_DIR, preset["name"] + ".txt")
+    if not os.path.exists(path):
+        raise Unavailable("no result yet: this scanner is not enabled, or has not run yet")
+    when = datetime.datetime.fromtimestamp(os.path.getmtime(path), datetime.timezone.utc)
+    return f"generated_at={when:%Y-%m-%dT%H:%M:%SZ}\n" + read_text(path, OUTPUT_MAX)
+
+
+# -- one request -------------------------------------------------------------------------
+
+def collect(preset, values):
+    """(status, text, exit code)"""
+    if preset["fn"]:
+        try:
+            return "ok", globals()["fn_" + preset["fn"]](preset, values), 0
+        except TimeoutError:
+            return "timeout", "", None
+        except PermissionError:
+            return "denied", "this collector has no access to the data", None
+        except OSError as e:
+            raise Unavailable(e.__class__.__name__)
+    commands = preset["argv"] if isinstance(preset["argv"][0], list) else [preset["argv"]]
+    parts, missing, status, last_code, ran = [], [], "ok", 0, 0
+    for argv in commands:
+        try:
+            argv = fill(argv, values)
+            code, text, cut, timed_out = run_one(argv, preset["timeout"])
+        except Unavailable as e:
+            missing.append(str(e))
+            continue
+        ran += 1
+        last_code = code
+        if len(commands) > 1:
+            parts.append(f"## {' '.join(argv[:3])}\n")
+        parts.append(text)
+        if cut:
+            status = "truncated"
+        if code not in preset["ok_codes"]:
+            status = "timeout" if timed_out else ("partial" if text.strip() else "unavailable")
+            if "Traceback (most recent call last)" in text:  # a crashed tool: its last line says why
+                parts[-1] = text.strip().splitlines()[-1] + "\n"
+    if not ran:
+        raise Unavailable("; ".join(missing))
+    text = "".join(parts)
+    if preset["post"] and status != "unavailable":
+        text = globals()["post_" + preset["post"]](text)
+    return status, text, last_code
+
+
+def peer_uid(conn):
+    return struct.unpack("3i", conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))[1]
+
+
+def rate_allowed(uid):
+    state = os.environ.get("STATE_DIRECTORY", "").split(":")[0]
+    if not state:
+        return True
+    fd = os.open(os.path.join(state, f"rate-{uid}"), os.O_RDWR | os.O_CREAT, 0o600)
+    with os.fdopen(fd, "r+") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        now = time.time()
+        try:
+            tokens, last = map(float, f.read().split())
+        except ValueError:
+            tokens, last = RATE_BURST, now
+        tokens = min(RATE_BURST, tokens + (now - last) * RATE_PER_SECOND)
+        allowed = tokens >= 1
+        f.seek(0)
+        f.truncate()
+        f.write(f"{tokens - 1 if allowed else tokens} {now}")
+        return allowed
+
+
+def cache_path(key, values):
+    cache = os.environ.get("CACHE_DIRECTORY", "").split(":")[0]
+    if not cache:
+        return None
+    return os.path.join(cache, hashlib.sha256(json.dumps([key, values], sort_keys=True).encode()).hexdigest())
+
+
+def cache_read(path, ttl):
+    if not path:
+        return None
+    try:
+        if time.time() - os.path.getmtime(path) < ttl:
+            with open(path, encoding="utf-8") as f:
+                return json.load(f)
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def cache_write(path, frame):
+    if path and frame["status"] in ("ok", "truncated"):
+        temporary = f"{path}.{os.getpid()}"
+        with open(temporary, "w", encoding="utf-8") as f:
+            json.dump(frame, f)
+        os.replace(temporary, path)
+
+
+def read_request(conn):
+    conn.settimeout(REQUEST_TIMEOUT)
+    data = b""
+    while b"\n" not in data and len(data) <= REQUEST_MAX:
+        chunk = conn.recv(REQUEST_MAX + 1)
+        if not chunk:
+            break
+        data += chunk
+    if len(data) > REQUEST_MAX:
+        raise Invalid("request too long")
+    try:
+        request = json.loads(data.split(b"\n", 1)[0].decode("utf-8"))
+    except ValueError:
+        raise Invalid("not a JSON request")
+    if not isinstance(request, dict):
+        raise Invalid("not a JSON request")
+    return request
+
+
+def sandbox_holds():
+    """A sandboxed collector must not be able to write outside its own directories."""
+    if not os.environ.get("AI_DIAG_SANDBOX"):
+        return True
+    probe = "/usr/.ai-diag-selftest"
+    try:
+        os.close(os.open(probe, os.O_WRONLY | os.O_CREAT, 0o600))
+    except OSError:
+        return True
+    os.unlink(probe)
+    return False
+
+
+def handle(profile, conn, uid, audit):
+    frame = dict(status="invalid", output="", scope="container" if catalog.in_container() else "host-global",
+                 generated_at=datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    try:
+        # read first: closing a socket with unread data would lose the answer
+        request = read_request(conn)
+        if not rate_allowed(uid):
+            frame.update(status="rate_limited", output="too many requests, slow down")
+            return frame
+        if not sandbox_holds():
+            frame.update(status="denied", output="the collector's sandbox is not in place")
+            return frame
+        key = f"{request.get('category')}/{request.get('preset')}"
+        preset = catalog.PRESETS.get(key)
+        if preset is None or preset["profile"] != profile:
+            raise Invalid("no such diagnostic on this socket")
+        frame.update(category=preset["category"], preset=preset["name"], untrusted=preset["untrusted"])
+        audit.update(category=preset["category"], preset=preset["name"])
+        if preset["physical"] and catalog.in_container():
+            raise Unavailable("not available in a container")
+        values = check_params(preset, request.get("params") or {})
+        audit["params"] = values
+        path = cache_path(key, values) if preset["ttl"] else None
+        cached = cache_read(path, preset["ttl"])
+        if cached:
+            cached["cached"] = True
+            return cached
+        status, text, code = collect(preset, values)
+        text = clean(text)
+        encoded = text.encode("utf-8")
+        if len(encoded) > OUTPUT_MAX:
+            text = encoded[:OUTPUT_MAX].decode("utf-8", errors="ignore")
+            status = "truncated" if status == "ok" else status
+        frame.update(status=status, output=text, exit_code=code)
+        cache_write(path, frame)
+    except Invalid as e:
+        frame.update(status="invalid", output=str(e))
+    except Unavailable as e:
+        frame.update(status="unavailable", output=str(e))
+    except (socket.timeout, TimeoutError):
+        frame.update(status="invalid", output="no request received in time")
+    return frame
+
+
+def main():
+    profile = sys.argv[1]
+    if profile not in catalog.PROFILES:
+        sys.exit(f"unknown profile {profile}")
+    os.umask(0o077)
+    conn = socket.socket(fileno=os.dup(0))
+    uid = peer_uid(conn)
+    started = time.monotonic()
+    audit = dict(uid=uid, profile=profile)
+    frame = handle(profile, conn, uid, audit)
+    conn.settimeout(10)
+    try:
+        conn.sendall(json.dumps(frame).encode("utf-8") + b"\n")
+    except OSError:
+        pass
+    audit.update(status=frame["status"], bytes=len(frame.get("output", "")), seconds=round(time.monotonic() - started, 2))
+    print("ai-diag " + json.dumps(audit), file=sys.stderr, flush=True)
+
+
+if __name__ == "__main__":
+    main()
